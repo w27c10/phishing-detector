@@ -60,6 +60,32 @@ _whois_pool  = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _whois_cache: dict[str, float] = {}
 
 
+# ── Trusted domain whitelist ───────────────────────────────────────────────────
+# Well-known legitimate platforms that should never be flagged.
+# Subdomains are also trusted (e.g. app.railway.com).
+
+_TRUSTED_DOMAINS = {
+    # Developer platforms
+    'railway.com', 'github.com', 'gitlab.com', 'bitbucket.org',
+    'vercel.com', 'netlify.com', 'heroku.com', 'render.com',
+    'fly.io', 'digitalocean.com', 'linode.com', 'vultr.com',
+    # Cloud consoles
+    'aws.amazon.com', 'console.cloud.google.com', 'portal.azure.com',
+    'cloudflare.com',
+    # Productivity / comms
+    'notion.so', 'figma.com', 'canva.com', 'miro.com',
+    'slack.com', 'discord.com', 'zoom.us', 'teams.microsoft.com',
+    # Dev tools
+    'stackoverflow.com', 'npmjs.com', 'pypi.org', 'docker.com',
+    # Payment processors (often embedded in pages)
+    'stripe.com', 'paypal.com',
+}
+
+def _is_trusted(url: str) -> bool:
+    host = urlparse(url).hostname or ''
+    return any(host == d or host.endswith('.' + d) for d in _TRUSTED_DOMAINS)
+
+
 # ── Endpoint ───────────────────────────────────────────────────────────────────
 
 @app.route('/health', methods=['GET'])
@@ -78,6 +104,11 @@ def analyze():
     dom        = str(body.get('dom',        ''))
     text       = str(body.get('text',       ''))
     screenshot = str(body.get('screenshot', ''))
+
+    if _is_trusted(url):
+        return jsonify({'threat_score': 0.0, 'verdict': 'safe', 'explanation_details': {
+            'url_diagnostic_message': 'Domain is in the trusted allowlist.'
+        }})
 
     # ── Neural branch inference ────────────────────────────────────────────────
     url_feat  = extract_url_features(url)
@@ -422,10 +453,10 @@ def _visual_score(url: str, screenshot_b64: str) -> float:
         for brand, colours in _BRAND_COLOURS.items():
             matched = sum(
                 1 for p in pixels
-                if any(_colour_dist(p, c) < 40 for c in colours)
+                if any(_colour_dist(p, c) < 25 for c in colours)
             )
             coverage = matched / n
-            if coverage > 0.18:   # brand colour covers >18 % of the viewport
+            if coverage > 0.28:   # brand colour covers >28 % of the viewport
                 legit = _BRAND_COLOUR_DOMAINS.get(brand, [])
                 if not any(d in host for d in legit):
                     return min(coverage * 3.0, 1.0)

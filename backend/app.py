@@ -451,8 +451,11 @@ def _dead_link_score(url: str, html: str) -> float:
         for a in links:
             href        = a.get('href', '').strip().lower()
             has_real    = href and href not in _DEAD_HREFS and not href.startswith('javascript:')
-            has_onclick = bool(a.get('onclick'))
-            has_data    = any(k.startswith('data-') for k in a.attrs)
+            has_onclick  = bool(a.get('onclick'))
+            # Only treat routing-specific data attributes as "functional"
+            _ROUTING_DATA = {'data-href', 'data-to', 'data-url', 'data-route',
+                             'data-link', 'data-path', 'data-navigate'}
+            has_data = any(k in _ROUTING_DATA for k in a.attrs)
             if not has_real and not has_onclick and not has_data:
                 dead += 1
 

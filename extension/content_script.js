@@ -87,6 +87,7 @@
       console.warn('[PhishingDetector]', chrome.runtime.lastError.message);
       return;
     }
+    console.log('[PhishingDetector] response:', JSON.stringify(response));
     if (response && response.threat_score >= 0.75) {
       injectWarning(response);
     }

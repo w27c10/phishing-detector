@@ -1,0 +1,9 @@
+# Training dependencies (also needed for create_stub_model.py)
+tensorflow==2.16.1
+tf2onnx==1.16.1
+onnx==1.16.1
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+beautifulsoup4==4.12.3
+lxml==5.2.2

@@ -1,0 +1,7 @@
+# Backend inference dependencies (no TensorFlow required at runtime)
+flask==3.0.3
+flask-cors==4.0.1
+onnxruntime==1.18.0
+numpy==1.26.4
+beautifulsoup4==4.12.3
+lxml==5.2.2

@@ -11,6 +11,18 @@
 // Production: 'https://your-app.up.railway.app/analyze'
 const API_URL = 'https://phishing-detector-production-dd47.up.railway.app/analyze';
 
+// Inject content script into blob: pages — these are invisible to the
+// manifest content_scripts declaration which only matches http/https.
+// Phishing pages often open as blob: URLs to evade URL-based detection.
+chrome.webNavigation.onCompleted.addListener((details) => {
+  if (details.frameId !== 0) return; // main frame only
+  if (!details.url.startsWith('blob:')) return;
+  chrome.scripting.executeScript({
+    target: { tabId: details.tabId },
+    files: ['content_script.js'],
+  }).catch(() => {});
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'analyze') return false;
 

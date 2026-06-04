@@ -14,7 +14,19 @@
 
   // ── 1. Scrape & sanitise ──────────────────────────────────────────────────
 
-  const url = window.location.href;
+  const rawUrl = window.location.href;
+
+  // For blob: URLs (e.g. blob:https://cxztsnation.com/uuid), extract the
+  // embedded HTTPS origin as the effective URL for analysis. The blob UUID
+  // itself carries no signal; the embedded domain is what matters.
+  let url = rawUrl;
+  if (rawUrl.startsWith('blob:')) {
+    try {
+      url = new URL(rawUrl.slice(5)).origin; // → https://cxztsnation.com
+    } catch (e) {
+      url = rawUrl;
+    }
+  }
 
   // Clone the DOM so we never touch the live page.
   const domClone = document.documentElement.cloneNode(true);
@@ -53,7 +65,8 @@
     return false;
   }
 
-  if (isTrusted(window.location.hostname)) return;
+  const effectiveHostname = new URL(url).hostname;
+  if (isTrusted(effectiveHostname)) return;
 
   // ── 3. Send to background worker ─────────────────────────────────────────
 

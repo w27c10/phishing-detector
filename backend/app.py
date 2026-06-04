@@ -59,6 +59,12 @@ _whois_cache: dict[str, float] = {}
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Quick check that the deployed code has the expected brand list."""
+    return jsonify({'brands': sorted(_BRAND_DOMAINS.keys()), 'usps_present': 'usps' in _BRAND_DOMAINS})
+
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
     body = request.get_json(force=True, silent=True)

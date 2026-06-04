@@ -81,6 +81,7 @@
     .slice(0, 2000);
   const text = prominentText;
 
+  console.log('[PhishingDetector] text sent to backend:', text);
   chrome.runtime.sendMessage({ type: 'analyze', url, dom, text }, (response) => {
     if (chrome.runtime.lastError) {
       console.warn('[PhishingDetector]', chrome.runtime.lastError.message);

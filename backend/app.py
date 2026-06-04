@@ -293,6 +293,12 @@ def analyze():
     brand_score     = _brand_text_score(url, text)
     gov_score       = _gov_impersonation_score(url)
     link_score      = _link_cluster_score(url, dom)
+    # NLP two-layer partner check: suppress false positives for legitimate dealers
+    if link_score >= 0.8:
+        if _is_brand_partner(dom):                                          # Layer 1
+            link_score = 0.0
+        elif _llm_partner_check(dom, _get_dominant_domain(url, dom)):      # Layer 2
+            link_score = 0.0
     dead_link_score = _dead_link_score(url, dom)
     age_score       = _domain_age_score(url)        # WHOIS, cached + timeout
     # ── Fusion ─────────────────────────────────────────────────────────────────
@@ -523,7 +529,107 @@ def _link_cluster_score(url: str, html: str) -> float:
         return 0.0
 
 
-# ── 4. Dead / decorative link scorer ──────────────────────────────────────────
+# ── 4. NLP brand-partner disambiguation ───────────────────────────────────────
+#
+# When link_cluster_score fires (≥ 0.8), it could be:
+#   A) A phishing clone that links back to the real site (bad)
+#   B) A legitimate dealer/partner whose site links to the official brand (good)
+#
+# Two-layer check:
+#   Layer 1 — fast regex: look for "authorized dealer / official partner" keywords
+#   Layer 2 — Gemini API: semantic classification for multilingual / keyword-absent cases
+
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
+
+_PARTNER_PATTERNS = [
+    r'authorized\s+(dealer|distributor|reseller|partner|agent|retailer|service)',
+    r'authorised\s+(dealer|distributor|reseller|partner|agent|retailer|service)',
+    r'official\s+(dealer|distributor|reseller|partner|agent|retailer)',
+    r'certified\s+(dealer|distributor|partner|agent)',
+    r'appointed\s+(dealer|distributor|partner|agent)',
+    r'\bdealership\b',
+    r'official\s+representative',
+    r'authorized\s+service\s+cent(er|re)',
+    r'authorised\s+service\s+cent(er|re)',
+    r'premium\s+(reseller|partner)',
+    r'reseller\s+of',
+    r'distributor\s+of',
+]
+
+
+def _is_brand_partner(html: str) -> bool:
+    """Layer 1: scan full page text for brand partner / dealer keyword patterns."""
+    if not html:
+        return False
+    try:
+        text = BeautifulSoup(html, 'html.parser').get_text(separator=' ').lower()
+        return any(re.search(p, text) for p in _PARTNER_PATTERNS)
+    except Exception:
+        return False
+
+
+def _get_dominant_domain(url: str, html: str) -> str:
+    """Return the most-linked external registered domain (used as LLM context)."""
+    if not html:
+        return ''
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        host = urlparse(url).hostname or ''
+        external: list[str] = []
+        for a in soup.find_all('a', href=True):
+            href = a['href'].strip()
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
+            netloc = urlparse(href).netloc
+            if not netloc or host in netloc:
+                continue
+            parts = netloc.split('.')
+            external.append(('.'.join(parts[-2:]) if len(parts) >= 2 else netloc).lower())
+        return Counter(external).most_common(1)[0][0] if external else ''
+    except Exception:
+        return ''
+
+
+def _llm_partner_check(html: str, dominant_domain: str) -> bool:
+    """
+    Layer 2: ask Gemini 1.5 Flash to classify the page as IMPERSONATION or PARTNER.
+    Only called when Layer 1 finds no keyword evidence.
+    Returns True (suppress phishing flag) if Gemini says PARTNER.
+    """
+    if not GEMINI_KEY or not html or not dominant_domain:
+        return False
+    try:
+        page_text = BeautifulSoup(html, 'html.parser').get_text(separator=' ')
+        page_text = ' '.join(page_text.split())[:600]   # clean whitespace, cap length
+
+        prompt = (
+            f'Page text: "{page_text}"\n'
+            f'Most-linked external domain: {dominant_domain}\n\n'
+            f'Is this page claiming to BE {dominant_domain} (phishing/impersonation), '
+            f'or is it an AUTHORIZED DEALER / PARTNER / RESELLER of {dominant_domain} '
+            f'(legitimate business)?\n'
+            f'Reply with exactly one word: IMPERSONATION or PARTNER.'
+        )
+        payload = json.dumps({
+            'contents': [{'parts': [{'text': prompt}]}]
+        }).encode()
+        req = urllib.request.Request(
+            f'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'gemini-1.5-flash:generateContent?key={GEMINI_KEY}',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        answer = result['candidates'][0]['content']['parts'][0]['text'].strip().upper()
+        print(f'[PhishingDetector] Gemini partner check → {answer} ({dominant_domain})')
+        return 'PARTNER' in answer
+    except Exception as exc:
+        print(f'[PhishingDetector] Gemini partner check failed: {exc}')
+        return False
+
+
+# ── 5. Dead / decorative link scorer ──────────────────────────────────────────
 
 def _dead_link_score(url: str, html: str) -> float:
     """

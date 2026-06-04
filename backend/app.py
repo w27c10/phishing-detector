@@ -18,7 +18,10 @@ import math
 import os
 import re
 import sys
+import threading
+import time
 import concurrent.futures
+import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -60,30 +63,121 @@ _whois_pool  = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _whois_cache: dict[str, float] = {}
 
 
-# ── Trusted domain whitelist ───────────────────────────────────────────────────
-# Well-known legitimate platforms that should never be flagged.
-# Subdomains are also trusted (e.g. app.railway.com).
+# ── Trusted domain system ──────────────────────────────────────────────────────
+# Two-layer trust:
+#   1. Manual whitelist — always trusted regardless of popularity.
+#   2. Auto-updated Tranco Top-10 000 — refreshed daily, cached to disk.
+#      Hosting platforms where attackers can create arbitrary subdomains
+#      are excluded from auto-trust even if they rank highly.
 
-_TRUSTED_DOMAINS = {
-    # Developer platforms
+_MANUAL_TRUSTED = {
+    # Developer / deployment platforms
     'railway.com', 'github.com', 'gitlab.com', 'bitbucket.org',
     'vercel.com', 'netlify.com', 'heroku.com', 'render.com',
-    'fly.io', 'digitalocean.com', 'linode.com', 'vultr.com',
+    'fly.io', 'digitalocean.com', 'cloudflare.com',
     # Cloud consoles
     'aws.amazon.com', 'console.cloud.google.com', 'portal.azure.com',
-    'cloudflare.com',
     # Productivity / comms
-    'notion.so', 'figma.com', 'canva.com', 'miro.com',
-    'slack.com', 'discord.com', 'zoom.us', 'teams.microsoft.com',
-    # Dev tools
-    'stackoverflow.com', 'npmjs.com', 'pypi.org', 'docker.com',
-    # Payment processors (often embedded in pages)
-    'stripe.com', 'paypal.com',
+    'notion.so', 'figma.com', 'canva.com', 'slack.com',
+    'discord.com', 'zoom.us',
+    # Payments
+    'stripe.com',
 }
+
+# Platforms that allow arbitrary user subdomains — never auto-trust these
+# even if they appear in the popularity list.
+_HOSTING_PLATFORMS = {
+    'github.io', 'gitlab.io', 'pages.dev', 'netlify.app', 'vercel.app',
+    'wixsite.com', 'weebly.com', 'webflow.io', 'wordpress.com',
+    'blogspot.com', 'webs.com', 'jimdo.com', 'squarespace.com',
+    'glitch.me', 'replit.dev', 'repl.co', 'pythonanywhere.com',
+    'mybluehost.me', 'biz.nf', 'site123.me', '000webhostapp.com',
+}
+
+_POPULAR_DOMAINS: set[str] = set()
+_POPULAR_LOCK    = threading.Lock()
+_POPULAR_CACHE   = os.path.join(os.path.dirname(__file__), '.popular_domains.txt')
+_POPULAR_TOP_N   = 10_000
+
+
+def _fetch_tranco() -> set[str]:
+    """Download Tranco Top-N from their public permalink."""
+    try:
+        req = urllib.request.Request(
+            'https://tranco-list.eu/download/latest/full',
+            headers={'User-Agent': 'PhishingDetector/1.0 (research)'},
+        )
+        domains: set[str] = set()
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            for i, line in enumerate(io.TextIOWrapper(resp)):
+                if i >= _POPULAR_TOP_N:
+                    break
+                parts = line.strip().split(',')
+                if len(parts) >= 2:
+                    d = parts[1].strip().lower()
+                    if d and d not in _HOSTING_PLATFORMS:
+                        domains.add(d)
+        return domains
+    except Exception as exc:
+        print(f'[PhishingDetector] Tranco fetch failed: {exc}')
+        return set()
+
+
+def _load_popular_cache() -> set[str]:
+    try:
+        if os.path.exists(_POPULAR_CACHE):
+            with open(_POPULAR_CACHE) as f:
+                return {ln.strip() for ln in f if ln.strip()}
+    except Exception:
+        pass
+    return set()
+
+
+def _save_popular_cache(domains: set[str]) -> None:
+    try:
+        with open(_POPULAR_CACHE, 'w') as f:
+            f.write('\n'.join(domains))
+    except Exception:
+        pass
+
+
+def _popular_refresh_loop() -> None:
+    global _POPULAR_DOMAINS
+    while True:
+        fresh = _fetch_tranco()
+        if fresh:
+            with _POPULAR_LOCK:
+                _POPULAR_DOMAINS = fresh
+            _save_popular_cache(fresh)
+            print(f'[PhishingDetector] Popular domains refreshed: {len(fresh)} entries')
+        time.sleep(86_400)   # re-fetch every 24 hours
+
+
+# Seed from on-disk cache immediately (zero cold-start gap).
+with _POPULAR_LOCK:
+    _POPULAR_DOMAINS = _load_popular_cache()
+
+# Kick off background refresh thread.
+threading.Thread(target=_popular_refresh_loop, daemon=True).start()
+
 
 def _is_trusted(url: str) -> bool:
     host = urlparse(url).hostname or ''
-    return any(host == d or host.endswith('.' + d) for d in _TRUSTED_DOMAINS)
+
+    # 1. Manual whitelist (exact host or any subdomain)
+    if any(host == d or host.endswith('.' + d) for d in _MANUAL_TRUSTED):
+        return True
+
+    # 2. Auto-popular list: use the registered domain (last two labels)
+    parts = host.split('.')
+    reg   = '.'.join(parts[-2:]) if len(parts) >= 2 else host
+
+    # Never auto-trust hosting platforms with user-controlled subdomains
+    if reg in _HOSTING_PLATFORMS:
+        return False
+
+    with _POPULAR_LOCK:
+        return reg in _POPULAR_DOMAINS
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────

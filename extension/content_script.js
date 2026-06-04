@@ -70,9 +70,16 @@
 
   // ── 3. Send to background worker ─────────────────────────────────────────
 
-  // Extract visible page text for brand impersonation detection.
-  // Capped at 8 000 chars — enough to catch brand names without bloating the payload.
-  const text = (document.body ? document.body.innerText : '').slice(0, 8000);
+  // Extract only PROMINENT text for brand impersonation detection:
+  // title, headings, and submit buttons. A phishing page puts the spoofed
+  // brand name in its heading. A real site mentioning another brand in its
+  // footer/payment-options section should NOT trigger the brand detector.
+  const prominentSelectors = 'title, h1, h2, h3, button[type="submit"], input[type="submit"]';
+  const prominentText = Array.from(document.querySelectorAll(prominentSelectors))
+    .map(el => el.innerText || el.value || el.textContent || '')
+    .join(' ')
+    .slice(0, 2000);
+  const text = prominentText;
 
   chrome.runtime.sendMessage({ type: 'analyze', url, dom, text }, (response) => {
     if (chrome.runtime.lastError) {

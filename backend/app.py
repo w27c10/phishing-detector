@@ -181,7 +181,7 @@ def _rule_url_score(url: str) -> float:
     # Brand keyword in subdomain but not in registered domain
     BRANDS = {'paypal','apple','amazon','google','microsoft','netflix',
               'facebook','instagram','whatsapp','bankofamerica','chase',
-              'wellsfargo','hsbc','dhl','fedex','ups','dropbox'}
+              'wellsfargo','hsbc','dhl','fedex','ups','usps','dropbox'}
     sub_text = ' '.join(subdomains).lower()
     reg_text = reg_domain.lower()
     for brand in BRANDS:
@@ -225,6 +225,7 @@ _BRAND_DOMAINS: dict[str, list[str]] = {
     'dhl':             ['dhl.com'],
     'fedex':           ['fedex.com'],
     'ups':             ['ups.com'],
+    'usps':            ['usps.com', 'usps.gov'],
     'steam':           ['steampowered.com', 'steamcommunity.com'],
     'coinbase':        ['coinbase.com'],
     'binance':         ['binance.com'],

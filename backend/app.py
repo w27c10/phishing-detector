@@ -71,17 +71,27 @@ _whois_cache: dict[str, float] = {}
 #      are excluded from auto-trust even if they rank highly.
 
 _MANUAL_TRUSTED = {
+    # Big tech — always safe regardless of Tranco cold-start
+    'google.com', 'youtube.com', 'gmail.com', 'googleapis.com',
+    'microsoft.com', 'live.com', 'outlook.com', 'office.com', 'bing.com',
+    'apple.com', 'icloud.com',
+    'amazon.com', 'amazonaws.com',
+    'facebook.com', 'instagram.com', 'meta.com', 'whatsapp.com',
+    'twitter.com', 'x.com',
+    'linkedin.com',
+    'netflix.com',
+    'wikipedia.org', 'wikimedia.org',
     # Developer / deployment platforms
     'railway.com', 'github.com', 'gitlab.com', 'bitbucket.org',
     'vercel.com', 'netlify.com', 'heroku.com', 'render.com',
-    'fly.io', 'digitalocean.com', 'cloudflare.com',
+    'fly.io', 'digitalocean.com', 'cloudflare.com', 'npmjs.com',
     # Cloud consoles
     'aws.amazon.com', 'console.cloud.google.com', 'portal.azure.com',
     # Productivity / comms
     'notion.so', 'figma.com', 'canva.com', 'slack.com',
-    'discord.com', 'zoom.us',
+    'discord.com', 'zoom.us', 'reddit.com',
     # Payments
-    'stripe.com',
+    'stripe.com', 'paypal.com',
 }
 
 # Platforms that allow arbitrary user subdomains — never auto-trust these
@@ -222,21 +232,18 @@ def analyze():
     link_score      = _link_cluster_score(url, dom)
     dead_link_score = _dead_link_score(url, dom)
     age_score       = _domain_age_score(url)        # WHOIS, cached + timeout
-    visual_score    = _visual_score(url, screenshot)
-
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — any one firing confidently means phishing.
-    if brand_score >= 0.8 or visual_score >= 0.7 or gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8:
-        final_score = max(brand_score, visual_score, gov_score, link_score, dead_link_score)
+    if brand_score >= 0.8 or gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8:
+        final_score = max(brand_score, gov_score, link_score, dead_link_score)
     else:
         final_score = (
-            0.20 * url_score        +
-            0.15 * age_score        +
-            0.20 * dom_score        +
+            0.25 * url_score        +
+            0.20 * age_score        +
+            0.25 * dom_score        +
             0.15 * meta_score       +
             0.10 * brand_score      +
-            0.10 * visual_score     +
-            0.10 * dead_link_score
+            0.05 * dead_link_score
         )
 
     # Adaptive threshold: suspicious URL lowers the bar for blocking
@@ -263,8 +270,6 @@ def analyze():
             'dead_link_message':            _dead_link_message(dead_link_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
-            'visual_threat_factor':         round(visual_score, 4),
-            'visual_diagnostic_message':    _visual_message(visual_score),
         },
     })
 
@@ -569,7 +574,7 @@ _BRAND_COLOURS: dict[str, list[tuple[int, int, int]]] = {
     'microsoft': [(0, 120, 212),  (255, 67, 0),  (127, 186, 0), (255, 185, 0)],
     'twitter':   [(29, 161, 242)],
     'amazon':    [(255, 153, 0),  (35, 47, 62)],
-    'netflix':   [(229, 9, 20),   (20, 20, 20)],
+    'netflix':   [(229, 9, 20)],
     'linkedin':  [(0, 119, 181)],
 }
 

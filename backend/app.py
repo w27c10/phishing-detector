@@ -216,12 +216,13 @@ def analyze():
     meta_score = float(outputs[3][0][0]) if _output_count > 3 else 0.0
 
     # ── Additional signal scorers ──────────────────────────────────────────────
-    url_score    = _rule_url_score(url)
-    brand_score  = _brand_text_score(url, text)
-    gov_score    = _gov_impersonation_score(url)
-    link_score   = _link_cluster_score(url, dom)
-    age_score    = _domain_age_score(url)        # WHOIS, cached + timeout
-    visual_score = _visual_score(url, screenshot)
+    url_score       = _rule_url_score(url)
+    brand_score     = _brand_text_score(url, text)
+    gov_score       = _gov_impersonation_score(url)
+    link_score      = _link_cluster_score(url, dom)
+    dead_link_score = _dead_link_score(url, dom)
+    age_score       = _domain_age_score(url)        # WHOIS, cached + timeout
+    visual_score    = _visual_score(url, screenshot)
 
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — any one firing confidently means phishing.
@@ -229,12 +230,13 @@ def analyze():
         final_score = max(brand_score, visual_score, gov_score, link_score)
     else:
         final_score = (
-            0.25 * url_score   +
-            0.20 * age_score   +
-            0.20 * dom_score   +
-            0.15 * meta_score  +
-            0.10 * brand_score +
-            0.10 * visual_score
+            0.20 * url_score        +
+            0.15 * age_score        +
+            0.20 * dom_score        +
+            0.15 * meta_score       +
+            0.10 * brand_score      +
+            0.10 * visual_score     +
+            0.10 * dead_link_score
         )
 
     # Adaptive threshold: suspicious URL lowers the bar for blocking
@@ -255,8 +257,10 @@ def analyze():
             'brand_diagnostic_message':     _brand_message(brand_score),
             'gov_impersonation_factor':     round(gov_score,    4),
             'gov_impersonation_message':    _gov_message(gov_score),
-            'link_cluster_factor':          round(link_score,   4),
+            'link_cluster_factor':          round(link_score,        4),
             'link_cluster_message':         _link_cluster_message(link_score),
+            'dead_link_factor':             round(dead_link_score,   4),
+            'dead_link_message':            _dead_link_message(dead_link_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
             'visual_threat_factor':         round(visual_score, 4),
@@ -417,7 +421,49 @@ def _link_cluster_score(url: str, html: str) -> float:
         return 0.0
 
 
-# ── 4. Brand text impersonation scorer ─────────────────────────────────────────
+# ── 4. Dead / decorative link scorer ──────────────────────────────────────────
+
+def _dead_link_score(url: str, html: str) -> float:
+    """
+    Measures the ratio of decorative (non-functional) anchor tags.
+
+    Legitimate sites wire up every navigation link. Phishing pages are
+    hastily cloned HTML — the data-collection form works but most
+    navigation buttons are left as href="#" / javascript:void(0) shells
+    with no onclick or router data attribute.
+
+    Only counts links with no real href AND no JS handler AND no data-*
+    routing attributes, so modern SPA router links (href="/path") are
+    not penalised.
+    """
+    if not html:
+        return 0.0
+    try:
+        soup  = BeautifulSoup(html, 'html.parser')
+        links = soup.find_all('a')
+        if len(links) < 10:          # too few links to be meaningful
+            return 0.0
+
+        _DEAD_HREFS = {'', '#', 'javascript:', 'javascript:void(0)',
+                       'javascript:void(0);', 'javascript: void(0)'}
+
+        dead = 0
+        for a in links:
+            href       = a.get('href', '').strip().lower()
+            has_real   = href and href not in _DEAD_HREFS and not href.startswith('javascript:')
+            has_onclick = bool(a.get('onclick'))
+            has_data    = any(k.startswith('data-') for k in a.attrs)
+            if not has_real and not has_onclick and not has_data:
+                dead += 1
+
+        ratio = dead / len(links)
+        # Return a score only when the majority of links are decorative
+        return round(ratio, 4) if ratio >= 0.50 else 0.0
+    except Exception:
+        return 0.0
+
+
+# ── 5. Brand text impersonation scorer ─────────────────────────────────────────
 
 # Maps brand keywords to their legitimate domain suffixes.
 _BRAND_DOMAINS: dict[str, list[str]] = {
@@ -586,6 +632,11 @@ def _brand_message(score: float) -> str:
     if score >= 0.8:
         return 'Brand name detected in page content — domain does not belong to that brand.'
     return 'No brand impersonation detected in visible page text.'
+
+def _dead_link_message(score: float) -> str:
+    if score >= 0.5:
+        return f'~{round(score * 100)}% of links are non-functional — page may be a cloned template.'
+    return 'Link functionality appears normal.'
 
 def _link_cluster_message(score: float) -> str:
     if score >= 0.8:

@@ -21,7 +21,9 @@ import sys
 import threading
 import time
 import concurrent.futures
+import json
 import urllib.request
+import urllib.parse
 from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -61,6 +63,55 @@ except Exception as exc:
 # Thread pool for non-blocking WHOIS lookups
 _whois_pool  = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _whois_cache: dict[str, float] = {}
+
+
+# ── Google Safe Browsing API ───────────────────────────────────────────────────
+
+_SB_KEY       = os.environ.get('SAFE_BROWSING_KEY', '')
+_sb_cache:  dict[str, tuple[float, float]] = {}   # url → (score, timestamp)
+_SB_TTL       = 1800   # cache results 30 min (Google's recommended minimum)
+
+def _safe_browsing_score(url: str) -> float:
+    """
+    Queries Google Safe Browsing Lookup API v4.
+    Returns 1.0 if the URL is flagged, 0.0 if clean or API unavailable.
+    Results are cached for 30 minutes to stay within the free quota.
+    """
+    if not _SB_KEY or not url:
+        return 0.0
+
+    now = time.time()
+    if url in _sb_cache:
+        score, ts = _sb_cache[url]
+        if now - ts < _SB_TTL:
+            return score
+
+    try:
+        payload = json.dumps({
+            'client': {'clientId': 'phishing-detector', 'clientVersion': '1.0'},
+            'threatInfo': {
+                'threatTypes':      ['SOCIAL_ENGINEERING', 'MALWARE', 'UNWANTED_SOFTWARE'],
+                'platformTypes':    ['ANY_PLATFORM'],
+                'threatEntryTypes': ['URL'],
+                'threatEntries':    [{'url': url}],
+            },
+        }).encode()
+
+        req = urllib.request.Request(
+            f'https://safebrowsing.googleapis.com/v4/threatMatches:find?key={_SB_KEY}',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            result = json.loads(resp.read())
+
+        score = 1.0 if result.get('matches') else 0.0
+    except Exception as exc:
+        print(f'[PhishingDetector] Safe Browsing API error: {exc}')
+        score = 0.0
+
+    _sb_cache[url] = (score, now)
+    return score
 
 
 # ── Trusted domain system ──────────────────────────────────────────────────────
@@ -213,6 +264,18 @@ def analyze():
         return jsonify({'threat_score': 0.0, 'verdict': 'safe', 'explanation_details': {
             'url_diagnostic_message': 'Domain is in the trusted allowlist.'
         }})
+
+    # ── Google Safe Browsing — check before running local models ──────────────
+    sb_score = _safe_browsing_score(url)
+    if sb_score >= 1.0:
+        return jsonify({
+            'threat_score': 1.0,
+            'verdict':      'phishing',
+            'explanation_details': {
+                'safe_browsing_factor':  1.0,
+                'safe_browsing_message': 'URL flagged by Google Safe Browsing.',
+            },
+        })
 
     # ── Neural branch inference ────────────────────────────────────────────────
     url_feat  = extract_url_features(url)

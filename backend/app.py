@@ -226,8 +226,8 @@ def analyze():
 
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — any one firing confidently means phishing.
-    if brand_score >= 0.8 or visual_score >= 0.7 or gov_score >= 0.8 or link_score >= 0.8:
-        final_score = max(brand_score, visual_score, gov_score, link_score)
+    if brand_score >= 0.8 or visual_score >= 0.7 or gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8:
+        final_score = max(brand_score, visual_score, gov_score, link_score, dead_link_score)
     else:
         final_score = (
             0.20 * url_score        +
@@ -441,7 +441,7 @@ def _dead_link_score(url: str, html: str) -> float:
     try:
         soup  = BeautifulSoup(html, 'html.parser')
         links = soup.find_all('a')
-        if len(links) < 10:          # too few links to be meaningful
+        if len(links) < 5:
             return 0.0
 
         _DEAD_HREFS = {'', '#', 'javascript:', 'javascript:void(0)',
@@ -449,16 +449,26 @@ def _dead_link_score(url: str, html: str) -> float:
 
         dead = 0
         for a in links:
-            href       = a.get('href', '').strip().lower()
-            has_real   = href and href not in _DEAD_HREFS and not href.startswith('javascript:')
+            href        = a.get('href', '').strip().lower()
+            has_real    = href and href not in _DEAD_HREFS and not href.startswith('javascript:')
             has_onclick = bool(a.get('onclick'))
             has_data    = any(k.startswith('data-') for k in a.attrs)
             if not has_real and not has_onclick and not has_data:
                 dead += 1
 
         ratio = dead / len(links)
-        # Return a score only when the majority of links are decorative
-        return round(ratio, 4) if ratio >= 0.50 else 0.0
+        if ratio < 0.50:
+            return 0.0
+
+        # On a free hosting platform, dead links are a much stronger phishing signal:
+        # attacker cloned a page but only wired up the payment/credential form.
+        host  = urlparse(url).hostname or ''
+        parts = host.split('.')
+        reg   = '.'.join(parts[-2:]) if len(parts) >= 2 else host
+        if reg in _HOSTING_PLATFORMS:
+            return min(ratio + 0.30, 1.0)   # 50 % dead → 0.80, 100 % dead → 1.0
+
+        return round(ratio, 4)
     except Exception:
         return 0.0
 

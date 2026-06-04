@@ -1,21 +1,32 @@
 """
 app.py — Flask inference server
 
-Loads phishing_model.onnx once at startup and exposes a single stateless
-POST /analyze endpoint. No data is written to disk or logged.
+Five-signal phishing detection pipeline:
+  1. Rule-based URL structure scorer  (deterministic)
+  2. DOM structure branch             (1-D CNN, neural)
+  3. Metadata behaviour branch        (DNN, neural)
+  4. Brand text impersonation         (keyword matching on visible page text)
+  5. Domain age via WHOIS             (newly registered = high risk)
+  6. Visual brand colour detection    (PIL analysis of page screenshot)
 
-Usage:
-    python app.py
-    # Server listens on http://0.0.0.0:5000
+POST /analyze — stateless, no data written to disk.
 """
 
+import base64
+import io
+import math
 import os
+import re
 import sys
+import concurrent.futures
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import numpy as np
 import onnxruntime as ort
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from PIL import Image
 
 from feature_extractor import (
     extract_dom_features,
@@ -26,21 +37,24 @@ from feature_extractor import (
 # ── App setup ──────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from the Chrome extension origin
+CORS(app)
 
 # ── Load ONNX model once at startup ───────────────────────────────────────────
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'model', 'phishing_model.onnx')
 
 try:
-    _session = ort.InferenceSession(MODEL_PATH)
+    _session      = ort.InferenceSession(MODEL_PATH)
     _input_names  = [inp.name for inp in _session.get_inputs()]
     _output_count = len(_session.get_outputs())
     print(f"[PhishingDetector] Model loaded. Inputs: {_input_names}")
 except Exception as exc:
     print(f"[PhishingDetector] ERROR: Could not load model from {MODEL_PATH}\n  {exc}")
-    print("  Run model/create_stub_model.py to generate a test model.")
     sys.exit(1)
+
+# Thread pool for non-blocking WHOIS lookups
+_whois_pool  = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+_whois_cache: dict[str, float] = {}
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────
@@ -51,70 +65,71 @@ def analyze():
     if not body:
         return jsonify({'error': 'Invalid JSON body'}), 400
 
-    url = str(body.get('url', ''))
-    dom = str(body.get('dom', ''))
+    url        = str(body.get('url',        ''))
+    dom        = str(body.get('dom',        ''))
+    text       = str(body.get('text',       ''))
+    screenshot = str(body.get('screenshot', ''))
 
-    # Build input tensors (shapes match model training exactly).
-    url_feat  = extract_url_features(url)        # (1, 256) int32
-    dom_feat  = extract_dom_features(dom)         # (1, 500) int32
-    meta_feat = extract_metadata_features(url, dom)  # (1, 20) float32
+    # ── Neural branch inference ────────────────────────────────────────────────
+    url_feat  = extract_url_features(url)
+    dom_feat  = extract_dom_features(dom)
+    meta_feat = extract_metadata_features(url, dom)
 
-    # Map by position: url_input, dom_input, meta_input (order from Model definition).
-    inputs = dict(zip(_input_names, [url_feat, dom_feat, meta_feat]))
+    inputs  = dict(zip(_input_names, [url_feat, dom_feat, meta_feat]))
     outputs = _session.run(None, inputs)
 
-    # Model outputs: [final_output, url_output, dom_output, meta_output]
-    # url_output (index 1) is no longer used for scoring — replaced by rule-based scorer.
-    # All shaped (1, 1) — extract the scalar.
     dom_score  = float(outputs[2][0][0]) if _output_count > 2 else 0.0
     meta_score = float(outputs[3][0][0]) if _output_count > 3 else 0.0
 
-    # Rule-based URL scorer — replaces the unreliable LSTM branch.
-    # Uses deterministic arithmetic on URL structure rather than learned weights,
-    # so it generalises to hosting-abuse phishing (e.g. cez.dvf.mybluehost.me)
-    # without producing false positives on clean domains like google.com.
-    url_score = _rule_url_score(url)
+    # ── Additional signal scorers ──────────────────────────────────────────────
+    url_score    = _rule_url_score(url)
+    brand_score  = _brand_text_score(url, text)
+    age_score    = _domain_age_score(url)        # WHOIS, cached + timeout
+    visual_score = _visual_score(url, screenshot)
 
-    # Weighted fusion: URL rules + DOM neural + metadata neural
-    final_score = 0.40 * url_score + 0.35 * dom_score + 0.25 * meta_score
+    # ── Fusion ─────────────────────────────────────────────────────────────────
+    # Brand impersonation and visual matches are hard overrides — if either
+    # fires confidently the page is almost certainly phishing.
+    if brand_score >= 0.8 or visual_score >= 0.7:
+        final_score = max(brand_score, visual_score)
+    else:
+        final_score = (
+            0.25 * url_score   +
+            0.20 * age_score   +
+            0.20 * dom_score   +
+            0.15 * meta_score  +
+            0.10 * brand_score +
+            0.10 * visual_score
+        )
 
-    # Adaptive threshold: a suspicious URL structure lowers the evidence bar.
-    # The more the URL looks like hosting-abuse phishing, the less corroboration
-    # we require from DOM and metadata before blocking.
-    # url_score=0.00 → threshold=0.75 (normal, no penalty for clean domains)
-    # url_score=0.40 → threshold=0.55  (cez.dvf.mybluehost.me range)
-    # url_score=1.00 → threshold=0.40  (floor — always flag extreme URL abuse)
+    # Adaptive threshold: suspicious URL lowers the bar for blocking
     threshold = max(0.40, 0.75 - url_score * 0.50)
-
-    verdict = 'phishing' if final_score >= threshold else 'safe'
+    verdict   = 'phishing' if final_score >= threshold else 'safe'
 
     return jsonify({
         'threat_score': round(final_score, 4),
-        'verdict': verdict,
+        'verdict':      verdict,
         'explanation_details': {
-            'url_threat_factor':        round(url_score, 4),
-            'url_diagnostic_message':   _url_message(url_score),
-            'dom_threat_factor':        round(dom_score, 4),
-            'dom_diagnostic_message':   _dom_message(dom_score),
-            'metadata_threat_factor':   round(meta_score, 4),
-            'metadata_diagnostic_message': _meta_message(meta_score),
+            'url_threat_factor':            round(url_score,    4),
+            'url_diagnostic_message':       _url_message(url_score),
+            'dom_threat_factor':            round(dom_score,    4),
+            'dom_diagnostic_message':       _dom_message(dom_score),
+            'metadata_threat_factor':       round(meta_score,   4),
+            'metadata_diagnostic_message':  _meta_message(meta_score),
+            'brand_threat_factor':          round(brand_score,  4),
+            'brand_diagnostic_message':     _brand_message(brand_score),
+            'domain_age_factor':            round(age_score,    4),
+            'domain_age_message':           _age_message(age_score),
+            'visual_threat_factor':         round(visual_score, 4),
+            'visual_diagnostic_message':    _visual_message(visual_score),
         },
     })
 
 
-# ── Rule-based URL risk scorer ─────────────────────────────────────────────────
+# ── 1. Rule-based URL risk scorer ──────────────────────────────────────────────
 
 def _rule_url_score(url: str) -> float:
-    """
-    Deterministic URL risk score in [0, 1].
-
-    Catches structural phishing patterns that the neural LSTM missed due to
-    limited training data, without producing false positives on clean domains.
-    Each rule adds to a cumulative risk budget; the total is clamped to 1.0.
-    """
-    import math
-    from urllib.parse import urlparse
-
+    """Deterministic URL risk score [0, 1] based on structural patterns."""
     try:
         parsed = urlparse(url)
         host   = parsed.hostname or ''
@@ -124,53 +139,49 @@ def _rule_url_score(url: str) -> float:
     parts      = host.split('.')
     tld        = parts[-1] if parts else ''
     reg_domain = '.'.join(parts[-2:]) if len(parts) >= 2 else host
-    subdomains = parts[:-2]           # everything left of the registered domain
+    subdomains = parts[:-2]
 
     risk = 0.0
 
-    # ── Subdomain abuse ───────────────────────────────────────────────────────
-    # Legitimate sites rarely have more than one subdomain (www, mail, etc.).
-    # Phishing pages on shared hosting often stack random short subdomains.
+    # Subdomain depth
     n_sub = len(subdomains)
     if n_sub >= 3:
-        risk += 0.50   # e.g. a.b.c.host.com — very unusual
+        risk += 0.50
     elif n_sub == 2:
-        risk += 0.30   # e.g. cez.dvf.mybluehost.me
+        risk += 0.30
 
-    # ── Subdomain entropy: random-looking labels are a strong phishing signal ─
+    # Subdomain entropy (random-looking labels)
     if subdomains:
         sub_str = ''.join(subdomains)
         n = len(sub_str)
         if n > 0:
-            freq = {}
+            freq: dict[str, int] = {}
             for c in sub_str:
                 freq[c] = freq.get(c, 0) + 1
             entropy = -sum((f / n) * math.log2(f / n) for f in freq.values())
             if entropy > 3.5:
-                risk += 0.25   # high-entropy = looks randomly generated
+                risk += 0.25
             elif entropy > 2.5:
                 risk += 0.10
 
-    # ── IP address as hostname ─────────────────────────────────────────────────
+    # IP address as host
     if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
         risk += 0.60
 
-    # ── @ symbol in URL (credential stuffing trick) ───────────────────────────
+    # @ symbol
     if '@' in url:
         risk += 0.50
 
-    # ── Suspicious TLDs commonly abused in phishing campaigns ─────────────────
-    RISKY_TLDS = {'tk', 'ml', 'ga', 'cf', 'gq', 'xyz', 'top', 'club',
-                  'work', 'click', 'link', 'online', 'site', 'website',
-                  'info', 'biz', 'pw', 'cc', 'su', 'ru'}
+    # Risky TLDs
+    RISKY_TLDS = {'tk','ml','ga','cf','gq','xyz','top','club','work','click',
+                  'link','online','site','website','info','biz','pw','cc','su','ru'}
     if tld.lower() in RISKY_TLDS:
         risk += 0.20
 
-    # ── Known brand terms in subdomain but not in registered domain ───────────
-    # e.g. paypal.secure-login.com — brand in subdomain, unrelated reg domain
-    BRANDS = {'paypal', 'apple', 'amazon', 'google', 'microsoft', 'netflix',
-              'facebook', 'instagram', 'whatsapp', 'bankofamerica', 'chase',
-              'wellsfargo', 'hsbc', 'dhl', 'fedex', 'ups', 'dropbox'}
+    # Brand keyword in subdomain but not in registered domain
+    BRANDS = {'paypal','apple','amazon','google','microsoft','netflix',
+              'facebook','instagram','whatsapp','bankofamerica','chase',
+              'wellsfargo','hsbc','dhl','fedex','ups','dropbox'}
     sub_text = ' '.join(subdomains).lower()
     reg_text = reg_domain.lower()
     for brand in BRANDS:
@@ -178,43 +189,203 @@ def _rule_url_score(url: str) -> float:
             risk += 0.50
             break
 
-    # ── Excessive URL length ──────────────────────────────────────────────────
+    # URL length
     if len(url) > 150:
         risk += 0.10
     if len(url) > 250:
         risk += 0.10
 
-    # ── Non-HTTPS ─────────────────────────────────────────────────────────────
+    # Non-HTTPS
     if parsed.scheme != 'https':
         risk += 0.10
 
     return min(risk, 1.0)
 
 
-# ── Diagnostic message generators ─────────────────────────────────────────────
+# ── 2. Brand text impersonation scorer ─────────────────────────────────────────
+
+# Maps brand keywords to their legitimate domain suffixes.
+_BRAND_DOMAINS: dict[str, list[str]] = {
+    'paypal':          ['paypal.com'],
+    'apple':           ['apple.com', 'icloud.com'],
+    'google':          ['google.com', 'gmail.com', 'accounts.google'],
+    'microsoft':       ['microsoft.com', 'live.com', 'outlook.com', 'office.com'],
+    'facebook':        ['facebook.com', 'meta.com'],
+    'instagram':       ['instagram.com'],
+    'amazon':          ['amazon.com', 'amazonaws.com'],
+    'netflix':         ['netflix.com'],
+    'twitter':         ['twitter.com', 'x.com'],
+    'linkedin':        ['linkedin.com'],
+    'dropbox':         ['dropbox.com'],
+    'chase':           ['chase.com', 'jpmorganchase.com'],
+    'bank of america': ['bankofamerica.com'],
+    'wells fargo':     ['wellsfargo.com'],
+    'citibank':        ['citibank.com', 'citi.com'],
+    'hsbc':            ['hsbc.com'],
+    'dhl':             ['dhl.com'],
+    'fedex':           ['fedex.com'],
+    'ups':             ['ups.com'],
+    'steam':           ['steampowered.com', 'steamcommunity.com'],
+    'coinbase':        ['coinbase.com'],
+    'binance':         ['binance.com'],
+    'crypto':          ['crypto.com'],
+}
+
+def _brand_text_score(url: str, text: str) -> float:
+    """
+    Returns 1.0 if a recognised brand name appears in the page's visible text
+    but the URL does not belong to that brand's legitimate domain.
+    """
+    host       = urlparse(url).hostname or ''
+    text_lower = text.lower()
+
+    for brand, legit_domains in _BRAND_DOMAINS.items():
+        if brand in text_lower:
+            if not any(d in host for d in legit_domains):
+                return 1.0
+    return 0.0
+
+
+# ── 3. Domain age scorer (WHOIS) ───────────────────────────────────────────────
+
+def _whois_lookup(domain: str) -> float:
+    """Run in a thread. Returns age risk score [0, 1]."""
+    try:
+        import whois as whois_lib
+        w        = whois_lib.whois(domain)
+        creation = w.creation_date
+        if isinstance(creation, list):
+            creation = creation[0]
+        if not creation:
+            return 0.0
+        if getattr(creation, 'tzinfo', None):
+            age_days = (datetime.now(timezone.utc) - creation).days
+        else:
+            age_days = (datetime.now() - creation).days
+        # 0 days → 1.0 risk; 365+ days → 0.0 risk
+        return max(0.0, 1.0 - age_days / 365.0)
+    except Exception:
+        return 0.0
+
+
+def _domain_age_score(url: str) -> float:
+    """WHOIS domain age with 3-second timeout and in-memory cache."""
+    host   = urlparse(url).hostname or ''
+    domain = re.sub(r'^www\.', '', host)
+    if not domain:
+        return 0.0
+    if domain in _whois_cache:
+        return _whois_cache[domain]
+    try:
+        score = _whois_pool.submit(_whois_lookup, domain).result(timeout=3.0)
+    except concurrent.futures.TimeoutError:
+        score = 0.0
+    _whois_cache[domain] = score
+    return score
+
+
+# ── 4. Visual brand colour scorer ──────────────────────────────────────────────
+
+# Primary brand colours (R, G, B). Each brand has 1-4 characteristic colours.
+_BRAND_COLOURS: dict[str, list[tuple[int, int, int]]] = {
+    'paypal':    [(0, 48, 135),   (0, 156, 222)],
+    'facebook':  [(24, 119, 242), (66, 103, 178)],
+    'google':    [(66, 133, 244), (234, 67, 53), (251, 188, 4), (52, 168, 83)],
+    'microsoft': [(0, 120, 212),  (255, 67, 0),  (127, 186, 0), (255, 185, 0)],
+    'twitter':   [(29, 161, 242)],
+    'amazon':    [(255, 153, 0),  (35, 47, 62)],
+    'netflix':   [(229, 9, 20),   (20, 20, 20)],
+    'linkedin':  [(0, 119, 181)],
+}
+
+_BRAND_COLOUR_DOMAINS: dict[str, list[str]] = {
+    'paypal':    ['paypal.com'],
+    'facebook':  ['facebook.com', 'meta.com'],
+    'google':    ['google.com', 'gmail.com'],
+    'microsoft': ['microsoft.com', 'live.com', 'outlook.com', 'office.com'],
+    'twitter':   ['twitter.com', 'x.com'],
+    'amazon':    ['amazon.com'],
+    'netflix':   ['netflix.com'],
+    'linkedin':  ['linkedin.com'],
+}
+
+def _colour_dist(a: tuple, b: tuple) -> float:
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+def _visual_score(url: str, screenshot_b64: str) -> float:
+    """
+    Decode the JPEG screenshot, downsample to 100×75, count pixels that match
+    known brand colour palettes. If a brand's colours dominate the viewport
+    but the URL doesn't belong to that brand, return a high risk score.
+    """
+    if not screenshot_b64:
+        return 0.0
+    try:
+        img_data = base64.b64decode(screenshot_b64)
+        img      = Image.open(io.BytesIO(img_data)).convert('RGB')
+        img      = img.resize((100, 75), Image.LANCZOS)
+        pixels   = list(img.getdata())
+        n        = len(pixels)
+        host     = urlparse(url).hostname or ''
+
+        for brand, colours in _BRAND_COLOURS.items():
+            matched = sum(
+                1 for p in pixels
+                if any(_colour_dist(p, c) < 40 for c in colours)
+            )
+            coverage = matched / n
+            if coverage > 0.18:   # brand colour covers >18 % of the viewport
+                legit = _BRAND_COLOUR_DOMAINS.get(brand, [])
+                if not any(d in host for d in legit):
+                    return min(coverage * 3.0, 1.0)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+# ── Diagnostic message generators ──────────────────────────────────────────────
 
 def _url_message(score: float) -> str:
     if score >= 0.75:
-        return 'Anomalous brand keyword sequence detected in subdomain structure.'
-    if score >= 0.5:
-        return 'Suspicious URL pattern detected with unusual character composition.'
+        return 'Anomalous brand keyword or structural pattern detected in URL.'
+    if score >= 0.40:
+        return 'Suspicious subdomain structure or URL composition detected.'
     return 'URL structure appears within normal parameters.'
-
 
 def _dom_message(score: float) -> str:
     if score >= 0.75:
-        return 'High structural layout correlation identified with a protected brand authentication template.'
-    if score >= 0.5:
-        return 'Page layout contains elements commonly associated with credential harvesting.'
+        return 'High structural correlation with known phishing page templates.'
+    if score >= 0.50:
+        return 'Page layout contains elements associated with credential harvesting.'
     return 'Page DOM structure appears within normal parameters.'
-
 
 def _meta_message(score: float) -> str:
     if score >= 0.75:
-        return 'Suspicious data routing configuration detected; form action links to an unassociated domain.'
-    if score >= 0.5:
+        return 'Suspicious data routing: form action targets an unassociated domain.'
+    if score >= 0.50:
         return 'Elevated ratio of external resource references detected.'
     return 'Page metadata and behavioural signals appear within normal parameters.'
+
+def _brand_message(score: float) -> str:
+    if score >= 0.8:
+        return 'Brand name detected in page content — domain does not belong to that brand.'
+    return 'No brand impersonation detected in visible page text.'
+
+def _age_message(score: float) -> str:
+    if score >= 0.90:
+        return 'Domain registered within the last 14 days — extremely high risk.'
+    if score >= 0.70:
+        return 'Domain registered within the last 3 months — elevated risk.'
+    if score >= 0.40:
+        return 'Domain registered within the last 6 months — moderate risk.'
+    return 'Domain has sufficient registration history.'
+
+def _visual_message(score: float) -> str:
+    if score >= 0.7:
+        return 'Brand colour signature detected in page screenshot — domain mismatch confirmed.'
+    if score >= 0.3:
+        return 'Partial brand colour match detected in page screenshot.'
+    return 'No brand colour signature detected in visual analysis.'
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
   "name": "AI Phishing Detector",
   "version": "1.0.0",
   "description": "Real-time explainable AI phishing detection powered by a multi-branch deep learning model.",
-  "permissions": ["scripting", "tabs", "webNavigation"],
+  "permissions": ["scripting", "tabs", "webNavigation", "activeTab"],
   "host_permissions": [
     "http://localhost:5000/*",
     "https://*.up.railway.app/*",

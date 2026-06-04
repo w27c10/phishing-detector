@@ -26,17 +26,31 @@ chrome.webNavigation.onCompleted.addListener((details) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'analyze') return false;
 
-  fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: message.url, dom: message.dom }),
-  })
-    .then((res) => res.json())
-    .then((data) => sendResponse(data))
-    .catch((err) => {
-      console.warn('[PhishingDetector] API error:', err.message);
-      sendResponse(null);
-    });
+  // Capture a JPEG screenshot of the tab for visual brand colour analysis,
+  // then POST all signals to the backend together.
+  const windowId = sender.tab ? sender.tab.windowId : chrome.windows.WINDOW_ID_CURRENT;
+
+  chrome.tabs.captureVisibleTab(windowId, { format: 'jpeg', quality: 40 }, (dataUrl) => {
+    // Strip the data URI prefix — backend only needs raw base64.
+    const screenshot = dataUrl ? dataUrl.split(',')[1] : '';
+
+    fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url:        message.url,
+        dom:        message.dom,
+        text:       message.text || '',
+        screenshot: screenshot,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => sendResponse(data))
+      .catch((err) => {
+        console.warn('[PhishingDetector] API error:', err.message);
+        sendResponse(null);
+      });
+  });
 
   // Return true to keep the message channel open for the async response.
   return true;

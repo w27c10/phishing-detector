@@ -393,7 +393,10 @@ def _rule_url_score(url: str) -> float:
     # Brand keyword in subdomain but not in registered domain
     BRANDS = {'paypal','apple','amazon','google','microsoft','netflix',
               'facebook','instagram','whatsapp','bankofamerica','chase',
-              'wellsfargo','hsbc','dhl','fedex','ups','usps','dropbox'}
+              'wellsfargo','hsbc','dhl','fedex','ups','usps','dropbox',
+              'bybit','binance','coinbase','okx','kraken','kucoin',
+              'huobi','htx','bitfinex','gemini','mexc','bitget','bitmex',
+              'phemex','etoro','robinhood','metamask','uniswap','opensea'}
     sub_text = ' '.join(subdomains).lower()
     reg_text = reg_domain.lower()
     for brand in BRANDS:
@@ -569,9 +572,31 @@ _BRAND_DOMAINS: dict[str, list[str]] = {
     'ups':             ['ups.com'],
     'usps':            ['usps.com', 'usps.gov'],
     'steam':           ['steampowered.com', 'steamcommunity.com'],
-    'coinbase':        ['coinbase.com'],
+    # ── Crypto exchanges & wallets ─────────────────────────────────────────────
     'binance':         ['binance.com'],
+    'coinbase':        ['coinbase.com'],
     'crypto':          ['crypto.com'],
+    'bybit':           ['bybit.com'],
+    'okx':             ['okx.com'],
+    'kraken':          ['kraken.com'],
+    'kucoin':          ['kucoin.com'],
+    'huobi':           ['huobi.com'],
+    'htx':             ['htx.com'],
+    'bitfinex':        ['bitfinex.com'],
+    'gemini':          ['gemini.com'],
+    'mexc':            ['mexc.com'],
+    'bitget':          ['bitget.com'],
+    'bitmex':          ['bitmex.com'],
+    'phemex':          ['phemex.com'],
+    'etoro':           ['etoro.com'],
+    'robinhood':       ['robinhood.com'],
+    'metamask':        ['metamask.io'],
+    'trust wallet':    ['trustwallet.com'],
+    'ledger':          ['ledger.com'],
+    'trezor':          ['trezor.io'],
+    'uniswap':         ['uniswap.org'],
+    'opensea':         ['opensea.io'],
+    'blockchain.com':  ['blockchain.com'],
 }
 
 def _brand_text_score(url: str, text: str) -> float:

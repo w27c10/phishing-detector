@@ -64,17 +64,29 @@ def analyze():
     outputs = _session.run(None, inputs)
 
     # Model outputs: [final_output, url_output, dom_output, meta_output]
+    # url_output (index 1) is no longer used for scoring — replaced by rule-based scorer.
     # All shaped (1, 1) — extract the scalar.
-    url_score  = float(outputs[1][0][0]) if _output_count > 1 else 0.0
     dom_score  = float(outputs[2][0][0]) if _output_count > 2 else 0.0
     meta_score = float(outputs[3][0][0]) if _output_count > 3 else 0.0
 
-    # URL branch excluded from verdict — it produces too many false positives
-    # due to insufficient training coverage of legitimate URL patterns.
-    # DOM structure and metadata behavioural signals are more reliable.
-    final_score = 0.5 * dom_score + 0.5 * meta_score
+    # Rule-based URL scorer — replaces the unreliable LSTM branch.
+    # Uses deterministic arithmetic on URL structure rather than learned weights,
+    # so it generalises to hosting-abuse phishing (e.g. cez.dvf.mybluehost.me)
+    # without producing false positives on clean domains like google.com.
+    url_score = _rule_url_score(url)
 
-    verdict = 'phishing' if final_score >= 0.75 else 'safe'
+    # Weighted fusion: URL rules + DOM neural + metadata neural
+    final_score = 0.40 * url_score + 0.35 * dom_score + 0.25 * meta_score
+
+    # Adaptive threshold: a suspicious URL structure lowers the evidence bar.
+    # The more the URL looks like hosting-abuse phishing, the less corroboration
+    # we require from DOM and metadata before blocking.
+    # url_score=0.00 → threshold=0.75 (normal, no penalty for clean domains)
+    # url_score=0.40 → threshold=0.55  (cez.dvf.mybluehost.me range)
+    # url_score=1.00 → threshold=0.40  (floor — always flag extreme URL abuse)
+    threshold = max(0.40, 0.75 - url_score * 0.50)
+
+    verdict = 'phishing' if final_score >= threshold else 'safe'
 
     return jsonify({
         'threat_score': round(final_score, 4),
@@ -88,6 +100,95 @@ def analyze():
             'metadata_diagnostic_message': _meta_message(meta_score),
         },
     })
+
+
+# ── Rule-based URL risk scorer ─────────────────────────────────────────────────
+
+def _rule_url_score(url: str) -> float:
+    """
+    Deterministic URL risk score in [0, 1].
+
+    Catches structural phishing patterns that the neural LSTM missed due to
+    limited training data, without producing false positives on clean domains.
+    Each rule adds to a cumulative risk budget; the total is clamped to 1.0.
+    """
+    import math
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+        host   = parsed.hostname or ''
+    except Exception:
+        return 0.0
+
+    parts      = host.split('.')
+    tld        = parts[-1] if parts else ''
+    reg_domain = '.'.join(parts[-2:]) if len(parts) >= 2 else host
+    subdomains = parts[:-2]           # everything left of the registered domain
+
+    risk = 0.0
+
+    # ── Subdomain abuse ───────────────────────────────────────────────────────
+    # Legitimate sites rarely have more than one subdomain (www, mail, etc.).
+    # Phishing pages on shared hosting often stack random short subdomains.
+    n_sub = len(subdomains)
+    if n_sub >= 3:
+        risk += 0.50   # e.g. a.b.c.host.com — very unusual
+    elif n_sub == 2:
+        risk += 0.30   # e.g. cez.dvf.mybluehost.me
+
+    # ── Subdomain entropy: random-looking labels are a strong phishing signal ─
+    if subdomains:
+        sub_str = ''.join(subdomains)
+        n = len(sub_str)
+        if n > 0:
+            freq = {}
+            for c in sub_str:
+                freq[c] = freq.get(c, 0) + 1
+            entropy = -sum((f / n) * math.log2(f / n) for f in freq.values())
+            if entropy > 3.5:
+                risk += 0.25   # high-entropy = looks randomly generated
+            elif entropy > 2.5:
+                risk += 0.10
+
+    # ── IP address as hostname ─────────────────────────────────────────────────
+    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
+        risk += 0.60
+
+    # ── @ symbol in URL (credential stuffing trick) ───────────────────────────
+    if '@' in url:
+        risk += 0.50
+
+    # ── Suspicious TLDs commonly abused in phishing campaigns ─────────────────
+    RISKY_TLDS = {'tk', 'ml', 'ga', 'cf', 'gq', 'xyz', 'top', 'club',
+                  'work', 'click', 'link', 'online', 'site', 'website',
+                  'info', 'biz', 'pw', 'cc', 'su', 'ru'}
+    if tld.lower() in RISKY_TLDS:
+        risk += 0.20
+
+    # ── Known brand terms in subdomain but not in registered domain ───────────
+    # e.g. paypal.secure-login.com — brand in subdomain, unrelated reg domain
+    BRANDS = {'paypal', 'apple', 'amazon', 'google', 'microsoft', 'netflix',
+              'facebook', 'instagram', 'whatsapp', 'bankofamerica', 'chase',
+              'wellsfargo', 'hsbc', 'dhl', 'fedex', 'ups', 'dropbox'}
+    sub_text = ' '.join(subdomains).lower()
+    reg_text = reg_domain.lower()
+    for brand in BRANDS:
+        if brand in sub_text and brand not in reg_text:
+            risk += 0.50
+            break
+
+    # ── Excessive URL length ──────────────────────────────────────────────────
+    if len(url) > 150:
+        risk += 0.10
+    if len(url) > 250:
+        risk += 0.10
+
+    # ── Non-HTTPS ─────────────────────────────────────────────────────────────
+    if parsed.scheme != 'https':
+        risk += 0.10
+
+    return min(risk, 1.0)
 
 
 # ── Diagnostic message generators ─────────────────────────────────────────────

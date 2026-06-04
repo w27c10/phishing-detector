@@ -9,7 +9,7 @@
 // ── Update this to your Railway URL after deployment ──────────────────────────
 // Local dev : 'http://localhost:5000/analyze'
 // Production: 'https://your-app.up.railway.app/analyze'
-const API_URL = 'https://phishing-detector-production-1373.up.railway.app/analyze';
+const API_URL = 'https://phishing-detector-production-dd47.up.railway.app/analyze';
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'analyze') return false;

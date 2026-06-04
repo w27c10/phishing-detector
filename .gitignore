@@ -1,0 +1,4 @@
+model/dataset*.csv 
+model/dataset*.pkl 
+model/__pycache__/ 
+backend/__pycache__/ 

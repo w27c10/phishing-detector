@@ -19,8 +19,11 @@ import os
 import re
 import sys
 import concurrent.futures
+from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+
+from bs4 import BeautifulSoup
 
 import numpy as np
 import onnxruntime as ort
@@ -91,13 +94,14 @@ def analyze():
     url_score    = _rule_url_score(url)
     brand_score  = _brand_text_score(url, text)
     gov_score    = _gov_impersonation_score(url)
+    link_score   = _link_cluster_score(url, dom)
     age_score    = _domain_age_score(url)        # WHOIS, cached + timeout
     visual_score = _visual_score(url, screenshot)
 
     # ── Fusion ─────────────────────────────────────────────────────────────────
-    # Brand/gov impersonation and visual matches are hard overrides.
-    if brand_score >= 0.8 or visual_score >= 0.7 or gov_score >= 0.8:
-        final_score = max(brand_score, visual_score, gov_score)
+    # Hard overrides — any one firing confidently means phishing.
+    if brand_score >= 0.8 or visual_score >= 0.7 or gov_score >= 0.8 or link_score >= 0.8:
+        final_score = max(brand_score, visual_score, gov_score, link_score)
     else:
         final_score = (
             0.25 * url_score   +
@@ -126,6 +130,8 @@ def analyze():
             'brand_diagnostic_message':     _brand_message(brand_score),
             'gov_impersonation_factor':     round(gov_score,    4),
             'gov_impersonation_message':    _gov_message(gov_score),
+            'link_cluster_factor':          round(link_score,   4),
+            'link_cluster_message':         _link_cluster_message(link_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
             'visual_threat_factor':         round(visual_score, 4),
@@ -247,7 +253,46 @@ def _gov_impersonation_score(url: str) -> float:
         return 0.0
 
 
-# ── 3. Brand text impersonation scorer ─────────────────────────────────────────
+# ── 3. Link cluster impersonation scorer ──────────────────────────────────────
+
+def _link_cluster_score(url: str, html: str) -> float:
+    """
+    Returns a high score when the overwhelming majority of external links on
+    a page point to a single domain that differs from the hosting domain.
+    This is the hallmark of a cloned/impersonation page: all nav links point
+    back to the real site while the page itself sits on an attacker's domain.
+    """
+    if not html:
+        return 0.0
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        host = urlparse(url).hostname or ''
+
+        external_domains: list[str] = []
+        for a in soup.find_all('a', href=True):
+            href = a['href'].strip()
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
+            netloc = urlparse(href).netloc
+            if not netloc or host in netloc:
+                continue                              # internal / relative link
+            parts  = netloc.split('.')
+            reg    = '.'.join(parts[-2:]) if len(parts) >= 2 else netloc
+            external_domains.append(reg.lower())
+
+        if len(external_domains) < 5:
+            return 0.0
+
+        top_domain, top_count = Counter(external_domains).most_common(1)[0]
+        ratio = top_count / len(external_domains)
+
+        # >80 % of all external links pointing to one domain = strong clone signal
+        return round(ratio, 4) if ratio >= 0.80 else 0.0
+    except Exception:
+        return 0.0
+
+
+# ── 4. Brand text impersonation scorer ─────────────────────────────────────────
 
 # Maps brand keywords to their legitimate domain suffixes.
 _BRAND_DOMAINS: dict[str, list[str]] = {
@@ -416,6 +461,11 @@ def _brand_message(score: float) -> str:
     if score >= 0.8:
         return 'Brand name detected in page content — domain does not belong to that brand.'
     return 'No brand impersonation detected in visible page text.'
+
+def _link_cluster_message(score: float) -> str:
+    if score >= 0.8:
+        return 'External links cluster to one domain — page is likely a clone of that site.'
+    return 'External links distributed normally.'
 
 def _gov_message(score: float) -> str:
     if score >= 0.8:

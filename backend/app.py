@@ -90,14 +90,14 @@ def analyze():
     # ── Additional signal scorers ──────────────────────────────────────────────
     url_score    = _rule_url_score(url)
     brand_score  = _brand_text_score(url, text)
+    gov_score    = _gov_impersonation_score(url)
     age_score    = _domain_age_score(url)        # WHOIS, cached + timeout
     visual_score = _visual_score(url, screenshot)
 
     # ── Fusion ─────────────────────────────────────────────────────────────────
-    # Brand impersonation and visual matches are hard overrides — if either
-    # fires confidently the page is almost certainly phishing.
-    if brand_score >= 0.8 or visual_score >= 0.7:
-        final_score = max(brand_score, visual_score)
+    # Brand/gov impersonation and visual matches are hard overrides.
+    if brand_score >= 0.8 or visual_score >= 0.7 or gov_score >= 0.8:
+        final_score = max(brand_score, visual_score, gov_score)
     else:
         final_score = (
             0.25 * url_score   +
@@ -124,6 +124,8 @@ def analyze():
             'metadata_diagnostic_message':  _meta_message(meta_score),
             'brand_threat_factor':          round(brand_score,  4),
             'brand_diagnostic_message':     _brand_message(brand_score),
+            'gov_impersonation_factor':     round(gov_score,    4),
+            'gov_impersonation_message':    _gov_message(gov_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
             'visual_threat_factor':         round(visual_score, 4),
@@ -180,7 +182,8 @@ def _rule_url_score(url: str) -> float:
 
     # Risky TLDs
     RISKY_TLDS = {'tk','ml','ga','cf','gq','xyz','top','club','work','click',
-                  'link','online','site','website','info','biz','pw','cc','su','ru'}
+                  'link','online','site','website','info','biz','pw','cc','su','ru',
+                  'shop','store','app','tech','live','vip','pro','cfd','sbs','cyou'}
     if tld.lower() in RISKY_TLDS:
         risk += 0.20
 
@@ -195,6 +198,12 @@ def _rule_url_score(url: str) -> float:
             risk += 0.50
             break
 
+    # Path TLD spoofing — e.g. /com or /net pretending to be a domain extension
+    FAKE_EXTS = {'com', 'net', 'org', 'gov', 'uk', 'us', 'edu'}
+    path_parts = [p for p in (parsed.path or '').strip('/').split('/') if p]
+    if path_parts and path_parts[0].lower() in FAKE_EXTS:
+        risk += 0.20
+
     # URL length
     if len(url) > 150:
         risk += 0.10
@@ -208,7 +217,37 @@ def _rule_url_score(url: str) -> float:
     return min(risk, 1.0)
 
 
-# ── 2. Brand text impersonation scorer ─────────────────────────────────────────
+# ── 2. Government keyword impersonation scorer ────────────────────────────────
+
+# Genuine government second-level domains to exclude from the check.
+_REAL_GOV_SLDS = {'gov.uk', 'gov.au', 'gov.nz', 'govt.nz', 'gov.sg', 'gov.in',
+                  'gov.za', 'gov.ca', 'gov.ie', 'gov.br', 'gob.mx', 'gouv.fr'}
+
+def _gov_impersonation_score(url: str) -> float:
+    """
+    Returns 1.0 if 'gov' appears as a standalone hyphen-delimited word in the
+    hostname but the domain is not a genuine government TLD or SLD.
+    """
+    try:
+        parsed = urlparse(url)
+        host   = parsed.hostname or ''
+        parts  = host.split('.')
+        tld    = parts[-1].lower()
+
+        if tld in ('gov', 'mil'):
+            return 0.0
+        if len(parts) >= 2 and f'{parts[-2].lower()}.{tld}' in _REAL_GOV_SLDS:
+            return 0.0
+
+        for part in parts:
+            if 'gov' in part.lower().split('-'):
+                return 1.0
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+# ── 3. Brand text impersonation scorer ─────────────────────────────────────────
 
 # Maps brand keywords to their legitimate domain suffixes.
 _BRAND_DOMAINS: dict[str, list[str]] = {
@@ -377,6 +416,11 @@ def _brand_message(score: float) -> str:
     if score >= 0.8:
         return 'Brand name detected in page content — domain does not belong to that brand.'
     return 'No brand impersonation detected in visible page text.'
+
+def _gov_message(score: float) -> str:
+    if score >= 0.8:
+        return 'Government keyword in non-.gov domain — high confidence impersonation.'
+    return 'No government keyword impersonation detected.'
 
 def _age_message(score: float) -> str:
     if score >= 0.90:

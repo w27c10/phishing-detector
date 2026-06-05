@@ -60,8 +60,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'check_redirect') {
     const state = tabState.get(tabId);
     if (state && state.url && state.url !== message.currentUrl) {
-      const wasSuspicious =
-        state.verdict === 'suspicious' || state.verdict === 'phishing';
+      // Treat 'pending' as suspicious — API may not have responded yet
+      // when check_redirect fires, but the URL change itself is already a signal.
+      const wasSuspicious = state.verdict !== 'safe';
       sendResponse({
         redirectedFrom:        wasSuspicious ? state.url     : null,
         redirectedFromVerdict: wasSuspicious ? state.verdict : null,

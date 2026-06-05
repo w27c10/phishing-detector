@@ -12,15 +12,9 @@
 const API_URL      = 'https://phishing-detector-production-dd47.up.railway.app/analyze';
 const API_URL_ONLY = 'https://phishing-detector-production-dd47.up.railway.app/analyze/url';
 
-// Per-tab state for redirect tracking — stored in chrome.storage.session so it
-// survives MV3 service worker restarts (in-memory Maps are wiped on restart).
-async function getTabState(tabId) {
-  const result = await chrome.storage.session.get(`tab_${tabId}`);
-  return result[`tab_${tabId}`] || null;
-}
-async function setTabState(tabId, state) {
-  await chrome.storage.session.set({ [`tab_${tabId}`]: state });
-}
+// Per-tab state for redirect tracking.
+// { tabId → { url: string, verdict: string } }
+const tabState = new Map();
 
 // Inject content script into blob: pages — these are invisible to the
 // manifest content_scripts declaration which only matches http/https.
@@ -39,7 +33,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // ── Phase 1: URL-only fast check (document_start) ──────────────────────
   if (message.type === 'early_url_capture') {
-    setTabState(tabId, { url: message.url, verdict: 'pending' });
+    // Store URL so Phase 2 can detect if a redirect happened.
+    tabState.set(tabId, { url: message.url, verdict: 'pending' });
 
     fetch(API_URL_ONLY, {
       method:  'POST',
@@ -48,12 +43,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })
       .then((r) => r.json())
       .then((data) => {
-        setTabState(tabId, { url: message.url, verdict: data.verdict });
+        tabState.set(tabId, { url: message.url, verdict: data.verdict });
         sendResponse(data);
       })
       .catch((err) => {
         console.warn('[PhishingDetector] early API error:', err.message);
-        setTabState(tabId, { url: message.url, verdict: 'safe' });
+        tabState.set(tabId, { url: message.url, verdict: 'safe' });
         sendResponse({ verdict: 'safe', threat_score: 0 });
       });
 
@@ -63,63 +58,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ── Redirect check: called by Phase 2 (document_idle) ──────────────────
   // If the current URL differs from what Phase 1 captured, a redirect occurred.
   if (message.type === 'check_redirect') {
-    getTabState(tabId).then((state) => {
-      if (state && state.url && state.url !== message.currentUrl) {
-        // Treat 'pending' as suspicious — the URL change itself is already a signal.
-        const wasSuspicious = state.verdict !== 'safe';
-        sendResponse({
-          redirectedFrom:        wasSuspicious ? state.url     : null,
-          redirectedFromVerdict: wasSuspicious ? state.verdict : null,
-          earlyVerdict:          state.verdict,
-        });
-      } else {
-        sendResponse({
-          redirectedFrom:        null,
-          redirectedFromVerdict: null,
-          earlyVerdict:          state ? state.verdict : null,
-        });
-      }
-    });
-    return true; // now async
+    const state = tabState.get(tabId);
+    if (state && state.url && state.url !== message.currentUrl) {
+      // Treat 'pending' as suspicious — API may not have responded yet
+      // when check_redirect fires, but the URL change itself is already a signal.
+      const wasSuspicious = state.verdict !== 'safe';
+      sendResponse({
+        redirectedFrom:        wasSuspicious ? state.url     : null,
+        redirectedFromVerdict: wasSuspicious ? state.verdict : null,
+        earlyVerdict:          state.verdict,
+      });
+    } else {
+      sendResponse({
+        redirectedFrom:        null,
+        redirectedFromVerdict: null,
+        earlyVerdict:          state ? state.verdict : null,
+      });
+    }
+    return false; // sync
   }
 
   // ── Phase 2: Full analysis (document_idle) ──────────────────────────────
   if (message.type !== 'analyze') return false;
 
   // If Phase 1 already hard-blocked, skip full analysis.
-  getTabState(tabId).then((early) => {
-    if (early && early.verdict === 'phishing') {
-      sendResponse({ verdict: 'phishing', threat_score: 1.0, _skipped: true });
-      return;
-    }
+  const early = tabState.get(tabId);
+  if (early && early.verdict === 'phishing') {
+    sendResponse({ verdict: 'phishing', threat_score: 1.0, _skipped: true });
+    return false;
+  }
 
-    // Capture a JPEG screenshot of the tab for visual brand colour analysis,
-    // then POST all signals to the backend together.
-    const windowId = sender.tab ? sender.tab.windowId : chrome.windows.WINDOW_ID_CURRENT;
+  // Capture a JPEG screenshot of the tab for visual brand colour analysis,
+  // then POST all signals to the backend together.
+  const windowId = sender.tab ? sender.tab.windowId : chrome.windows.WINDOW_ID_CURRENT;
 
-    chrome.tabs.captureVisibleTab(windowId, { format: 'jpeg', quality: 40 }, (dataUrl) => {
-      const screenshot = dataUrl ? dataUrl.split(',')[1] : '';
+  chrome.tabs.captureVisibleTab(windowId, { format: 'jpeg', quality: 40 }, (dataUrl) => {
+    // Strip the data URI prefix — backend only needs raw base64.
+    const screenshot = dataUrl ? dataUrl.split(',')[1] : '';
 
-      fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url:        message.url,
-          dom:        message.dom,
-          text:       message.text || '',
-          screenshot: screenshot,
-        }),
+    fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url:        message.url,
+        dom:        message.dom,
+        text:       message.text || '',
+        screenshot: screenshot,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        // Update tab state with final verdict.
+        if (tabId) tabState.set(tabId, { url: message.url, verdict: data.verdict });
+        sendResponse(data);
       })
-        .then((res) => res.json())
-        .then((data) => {
-          setTabState(tabId, { url: message.url, verdict: data.verdict });
-          sendResponse(data);
-        })
-        .catch((err) => {
-          console.warn('[PhishingDetector] API error:', err.message);
-          sendResponse(null);
-        });
-    });
+      .catch((err) => {
+        console.warn('[PhishingDetector] API error:', err.message);
+        sendResponse(null);
+      });
   });
 
   // Return true to keep the message channel open for the async response.

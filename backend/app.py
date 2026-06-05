@@ -28,6 +28,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import tldextract
 from bs4 import BeautifulSoup
 
 import numpy as np
@@ -386,6 +387,16 @@ def analyze():
 
 # ── 1. Rule-based URL risk scorer ──────────────────────────────────────────────
 
+def _reg_domain(host: str) -> str:
+    """Registered domain using tldextract (handles .com.my, .co.uk, etc.)."""
+    try:
+        r = tldextract.extract(host)
+        return r.top_domain_under_public_suffix or host
+    except Exception:
+        parts = host.split('.')
+        return '.'.join(parts[-2:]) if len(parts) >= 2 else host
+
+
 def _rule_url_score(url: str) -> float:
     """Deterministic URL risk score [0, 1] based on structural patterns."""
     try:
@@ -394,10 +405,10 @@ def _rule_url_score(url: str) -> float:
     except Exception:
         return 0.0
 
-    parts      = host.split('.')
-    tld        = parts[-1] if parts else ''
-    reg_domain = '.'.join(parts[-2:]) if len(parts) >= 2 else host
-    subdomains = parts[:-2]
+    ext        = tldextract.extract(host)
+    tld        = ext.suffix.split('.')[-1] if ext.suffix else (host.split('.')[-1])
+    reg_domain = ext.top_domain_under_public_suffix or host
+    subdomains = [s for s in ext.subdomain.split('.') if s]
 
     risk = 0.0
 
@@ -547,16 +558,18 @@ def _link_cluster_score(url: str, html: str) -> float:
         soup = BeautifulSoup(html, 'html.parser')
         host = urlparse(url).hostname or ''
 
+        page_reg = _reg_domain(host)
         external_domains: list[str] = []
         for a in soup.find_all('a', href=True):
             href = a['href'].strip()
             if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 continue
             netloc = urlparse(href).netloc
-            if not netloc or host in netloc:
-                continue                              # internal / relative link
-            parts  = netloc.split('.')
-            reg    = '.'.join(parts[-2:]) if len(parts) >= 2 else netloc
+            if not netloc:
+                continue
+            reg = _reg_domain(netloc)
+            if not reg or reg == page_reg:
+                continue                              # internal / same-site link
             external_domains.append(reg.lower())
 
         if len(external_domains) < 5:

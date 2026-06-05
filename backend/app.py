@@ -243,6 +243,42 @@ def _is_trusted(url: str) -> bool:
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────
 
+@app.route('/analyze/url', methods=['POST'])
+def analyze_url_only():
+    """
+    Fast URL-only analysis for the document_start phase.
+    Runs only instant scorers (no WHOIS, no DOM).
+    Hard-blocks only on Safe Browsing hits or gov impersonation (≥0.8).
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    url  = str(body.get('url', ''))
+    if not url:
+        return jsonify({'verdict': 'safe', 'threat_score': 0.0}), 400
+
+    if _is_trusted(url):
+        return jsonify({'verdict': 'safe', 'threat_score': 0.0})
+
+    # Safe Browsing — cached, fast
+    sb_score = _safe_browsing_score(url)
+    if sb_score >= 1.0:
+        return jsonify({'verdict': 'phishing', 'threat_score': 1.0, 'reason': 'safe_browsing'})
+
+    url_score = _rule_url_score(url)
+    gov_score = _gov_impersonation_score(url)
+
+    # Hard-block only on high-confidence URL signals (no DOM to disambiguate)
+    if gov_score >= 0.8:
+        return jsonify({'verdict': 'phishing', 'threat_score': round(gov_score, 4), 'reason': 'gov_impersonation'})
+
+    combined = max(url_score, gov_score)
+    if combined >= 0.35:
+        verdict = 'suspicious'
+    else:
+        verdict = 'safe'
+
+    return jsonify({'verdict': verdict, 'threat_score': round(combined, 4)})
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Quick check that the deployed code has the expected brand list."""

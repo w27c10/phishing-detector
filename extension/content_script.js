@@ -81,18 +81,29 @@
     .slice(0, 2000);
   const text = prominentText;
 
-  console.log('[PhishingDetector] text sent to backend:', text);
-  chrome.runtime.sendMessage({ type: 'analyze', url, dom, text }, (response) => {
-    if (chrome.runtime.lastError) {
-      console.warn('[PhishingDetector]', chrome.runtime.lastError.message);
-      return;
+  // ── Check for redirect from suspicious site (Phase 1 → Phase 2 handoff) ──
+  chrome.runtime.sendMessage({ type: 'check_redirect', currentUrl: url }, (redirectInfo) => {
+    if (redirectInfo && redirectInfo.redirectedFrom) {
+      injectRedirectBanner(redirectInfo.redirectedFrom, redirectInfo.redirectedFromVerdict);
     }
-    console.log('[PhishingDetector] response:', JSON.stringify(response));
-    if (response && response.verdict === 'phishing') {
-      injectWarning(response);
-    } else if (response && response.verdict === 'suspicious') {
-      injectCautionBanner(response);
-    }
+
+    // Skip full analysis if Phase 1 already hard-blocked this tab.
+    if (redirectInfo && redirectInfo.earlyVerdict === 'phishing') return;
+
+    // ── Full analysis (Phase 2) ─────────────────────────────────────────────
+    console.log('[PhishingDetector] text sent to backend:', text);
+    chrome.runtime.sendMessage({ type: 'analyze', url, dom, text }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[PhishingDetector]', chrome.runtime.lastError.message);
+        return;
+      }
+      console.log('[PhishingDetector] response:', JSON.stringify(response));
+      if (response && response.verdict === 'phishing') {
+        injectWarning(response);
+      } else if (response && response.verdict === 'suspicious') {
+        injectCautionBanner(response);
+      }
+    });
   });
 
   // ── 3. Warning overlay (Shadow DOM) ──────────────────────────────────────
@@ -122,6 +133,59 @@
         </div>
         <div class="factor-score ${cls}">${pct}%</div>
       </div>`;
+  }
+
+  // Shown on the destination page after a redirect from a suspicious/phishing URL.
+  function injectRedirectBanner(fromUrl, fromVerdict) {
+    if (document.getElementById('__phishing_shield_redirect_host__')) return;
+
+    const isPhishing = fromVerdict === 'phishing';
+    const color      = isPhishing ? '#7a0000' : '#7a4f00';
+    const border     = isPhishing ? '#e74c3c' : '#f0a500';
+    const textColor  = isPhishing ? '#ffb3b3' : '#ffe8a3';
+    const titleColor = isPhishing ? '#ff6b6b' : '#ffd166';
+    const label      = isPhishing ? '🚨 Redirected from phishing site' : '⚠️ Redirected from suspicious site';
+
+    const host = document.createElement('div');
+    host.id = '__phishing_shield_redirect_host__';
+    host.style.cssText =
+      'position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:all';
+    document.documentElement.appendChild(host);
+
+    const shadow = host.attachShadow({ mode: 'closed' });
+    shadow.innerHTML = `
+      <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :host { all: initial; }
+        .banner {
+          width: 100%; background: ${color}; border-bottom: 2px solid ${border};
+          padding: 10px 16px; display: flex; align-items: center; gap: 12px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          font-size: 13px; color: ${textColor};
+        }
+        .body { flex: 1; line-height: 1.5; }
+        .title { font-weight: 700; color: ${titleColor}; }
+        .origin {
+          display: inline-block; background: rgba(0,0,0,.25); border-radius: 4px;
+          padding: 1px 6px; font-size: 11px; font-family: monospace; word-break: break-all;
+        }
+        .btn-close {
+          background: transparent; border: 1px solid rgba(255,255,255,.25);
+          border-radius: 6px; color: ${titleColor}; cursor: pointer;
+          font-size: 13px; padding: 4px 10px; flex-shrink: 0;
+          transition: background .15s;
+        }
+        .btn-close:hover { background: rgba(255,255,255,.1); }
+      </style>
+      <div class="banner">
+        <div class="body">
+          <span class="title">${label}</span><br>
+          Origin: <span class="origin">${escapeHtml(fromUrl)}</span>
+        </div>
+        <button class="btn-close" id="btn-close">Dismiss ✕</button>
+      </div>`;
+
+    shadow.getElementById('btn-close').addEventListener('click', () => host.remove());
   }
 
   // Returns the top (up to 3) factor labels with score ≥ 0.5, sorted descending.

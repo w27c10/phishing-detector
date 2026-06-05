@@ -15,6 +15,11 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
+      "js": ["content_script_early.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
       "js": ["content_script.js"],
       "run_at": "document_idle"
     }

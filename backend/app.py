@@ -437,7 +437,8 @@ def _rule_url_score(url: str) -> float:
     sub_text = ' '.join(subdomains).lower()
     reg_text = reg_domain.lower()
     for brand in BRANDS:
-        if brand in sub_text and brand not in reg_text:
+        pattern = r'\b' + re.escape(brand) + r'\b'
+        if re.search(pattern, sub_text) and not re.search(pattern, reg_text):
             risk += 0.50
             break
 
@@ -875,16 +876,34 @@ _BRAND_DOMAINS: dict[str, list[str]] = {
     'centrelink':          ['servicesaustralia.gov.au'],
 }
 
+# Brands that are short (≤3 chars) or common English words.
+# These require ≥2 occurrences in page text to fire, reducing false positives
+# where the word appears incidentally (e.g. "ing" in "savings", "line" in "online").
+_AMBIGUOUS_BRANDS: frozenset = frozenset({
+    # ≤3 chars
+    'ing', 'dbs', 'uob', 'aia', 'anz', 'sbi', 'rbc', 'bmo',
+    'htx', 'okx', 'cvs', 'nhs', 'hbo', 'ups', 'axa',
+    # Common English words
+    'grab', 'line', 'wise', 'signal', 'globe', 'chase',
+    'discover', 'booking', 'paramount', 'affirm', 'ledger',
+    'crypto', 'steam', 'chime',
+})
+
 def _brand_text_score(url: str, text: str) -> float:
     """
     Returns 1.0 if a recognised brand name appears in the page's visible text
     but the URL does not belong to that brand's legitimate domain.
+
+    Uses word-boundary matching (\b) so 'ing' won't match 'savings', etc.
+    Ambiguous/short brands require ≥2 occurrences to fire.
     """
     host       = urlparse(url).hostname or ''
     text_lower = text.lower()
 
     for brand, legit_domains in _BRAND_DOMAINS.items():
-        if brand in text_lower:
+        pattern   = r'\b' + re.escape(brand) + r'\b'
+        min_count = 2 if brand in _AMBIGUOUS_BRANDS else 1
+        if len(re.findall(pattern, text_lower)) >= min_count:
             if not any(d in host for d in legit_domains):
                 return 1.0
     return 0.0

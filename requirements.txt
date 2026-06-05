@@ -7,3 +7,4 @@ beautifulsoup4==4.12.3
 lxml==5.2.2
 python-whois==0.9.5
 Pillow==10.3.0
+tldextract==5.1.2

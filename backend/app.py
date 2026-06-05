@@ -317,7 +317,12 @@ def analyze():
 
     # Adaptive threshold: suspicious URL lowers the bar for blocking
     threshold = max(0.40, 0.75 - url_score * 0.50)
-    verdict   = 'phishing' if final_score >= threshold else 'safe'
+    if final_score >= threshold:
+        verdict = 'phishing'
+    elif final_score >= 0.35:
+        verdict = 'suspicious'
+    else:
+        verdict = 'safe'
 
     return jsonify({
         'threat_score': round(final_score, 4),

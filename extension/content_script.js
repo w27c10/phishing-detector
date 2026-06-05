@@ -88,8 +88,10 @@
       return;
     }
     console.log('[PhishingDetector] response:', JSON.stringify(response));
-    if (response && response.threat_score >= 0.75) {
+    if (response && response.verdict === 'phishing') {
       injectWarning(response);
+    } else if (response && response.verdict === 'suspicious') {
+      injectCautionBanner(response);
     }
   });
 
@@ -120,6 +122,100 @@
         </div>
         <div class="factor-score ${cls}">${pct}%</div>
       </div>`;
+  }
+
+  // Returns the top (up to 3) factor labels with score ≥ 0.5, sorted descending.
+  function topFactors(exp) {
+    return [
+      ['URL Analysis',        exp.url_threat_factor],
+      ['Page Structure',      exp.dom_threat_factor],
+      ['Metadata Behaviour',  exp.metadata_threat_factor],
+      ['Brand Impersonation', exp.brand_threat_factor],
+      ['Domain Age',          exp.domain_age_factor],
+      ['Link Clustering',     exp.link_cluster_factor],
+      ['Dead Links',          exp.dead_link_factor],
+    ]
+      .filter(([, s]) => typeof s === 'number' && s >= 0.5)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 3)
+      .map(([label]) => label);
+  }
+
+  function injectCautionBanner(data) {
+    if (document.getElementById('__phishing_shield_banner_host__')) return;
+
+    const exp      = data.explanation_details || {};
+    const totalPct = Math.round(data.threat_score * 100);
+    const reasons  = topFactors(exp);
+    const pillsHtml = reasons.length
+      ? reasons.map(r => `<span class="pill">${escapeHtml(r)}</span>`).join('')
+      : '<span class="pill">Elevated risk score</span>';
+
+    const host = document.createElement('div');
+    host.id = '__phishing_shield_banner_host__';
+    host.style.cssText =
+      'position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:all';
+    document.documentElement.appendChild(host);
+
+    const shadow = host.attachShadow({ mode: 'closed' });
+
+    shadow.innerHTML = `
+      <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :host { all: initial; }
+
+        .banner {
+          width: 100%;
+          background: #7a4f00;
+          border-bottom: 2px solid #f0a500;
+          padding: 10px 16px;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          font-size: 13px;
+          color: #ffe8a3;
+        }
+        .icon { font-size: 18px; flex-shrink: 0; }
+        .body { flex: 1; line-height: 1.5; }
+        .title { font-weight: 700; color: #ffd166; }
+        .score { font-weight: 600; color: #ffd166; }
+        .pills { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+        .pill {
+          background: rgba(255,209,102,0.15);
+          border: 1px solid rgba(255,209,102,0.4);
+          border-radius: 20px;
+          padding: 2px 8px;
+          font-size: 11px;
+          color: #ffd166;
+        }
+        .btn-close {
+          background: transparent;
+          border: 1px solid rgba(255,209,102,0.4);
+          border-radius: 6px;
+          color: #ffd166;
+          cursor: pointer;
+          font-size: 13px;
+          padding: 4px 10px;
+          flex-shrink: 0;
+          transition: background .15s;
+        }
+        .btn-close:hover { background: rgba(255,209,102,0.15); }
+      </style>
+
+      <div class="banner">
+        <span class="icon">⚠️</span>
+        <div class="body">
+          <span class="title">Proceed with caution</span>
+          — threat score <span class="score">${totalPct}%</span>.
+          Suspicious signals detected:
+          <div class="pills">${pillsHtml}</div>
+        </div>
+        <button class="btn-close" id="btn-close">Dismiss ✕</button>
+      </div>
+    `;
+
+    shadow.getElementById('btn-close').addEventListener('click', () => host.remove());
   }
 
   function injectWarning(data) {

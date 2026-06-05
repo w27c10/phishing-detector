@@ -28,6 +28,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import tldextract
 from bs4 import BeautifulSoup
 
 import numpy as np
@@ -229,9 +230,8 @@ def _is_trusted(url: str) -> bool:
     if any(host == d or host.endswith('.' + d) for d in _MANUAL_TRUSTED):
         return True
 
-    # 2. Auto-popular list: use the registered domain (last two labels)
-    parts = host.split('.')
-    reg   = '.'.join(parts[-2:]) if len(parts) >= 2 else host
+    # 2. Auto-popular list: use the registered domain (tldextract-aware)
+    reg = _registered_domain(host)
 
     # Never auto-trust hosting platforms with user-controlled subdomains
     if reg in _HOSTING_PLATFORMS:
@@ -384,6 +384,32 @@ def analyze():
     })
 
 
+# ── Domain parsing helper ──────────────────────────────────────────────────────
+
+def _extract_domain(host: str):
+    """
+    Parse host into (subdomain, domain, suffix) using tldextract.
+    Correctly handles multi-part TLDs like .com.my, .co.uk, .com.sg.
+    Falls back gracefully if tldextract fails.
+    """
+    try:
+        r = tldextract.extract(host)
+        return r.subdomain, r.domain, r.suffix
+    except Exception:
+        parts = host.split('.')
+        return '.'.join(parts[:-2]), parts[-2] if len(parts) >= 2 else host, parts[-1]
+
+
+def _registered_domain(host: str) -> str:
+    """Return the registered domain (e.g. 'lazada.com.my', not 'com.my')."""
+    try:
+        r = tldextract.extract(host)
+        return r.top_domain_under_public_suffix or host
+    except Exception:
+        parts = host.split('.')
+        return '.'.join(parts[-2:]) if len(parts) >= 2 else host
+
+
 # ── 1. Rule-based URL risk scorer ──────────────────────────────────────────────
 
 def _rule_url_score(url: str) -> float:
@@ -394,10 +420,10 @@ def _rule_url_score(url: str) -> float:
     except Exception:
         return 0.0
 
-    parts      = host.split('.')
-    tld        = parts[-1] if parts else ''
-    reg_domain = '.'.join(parts[-2:]) if len(parts) >= 2 else host
-    subdomains = parts[:-2]
+    subdomain_str, domain_name, suffix = _extract_domain(host)
+    tld        = suffix.split('.')[-1] if suffix else ''
+    reg_domain = f'{domain_name}.{suffix}' if domain_name and suffix else host
+    subdomains = [s for s in subdomain_str.split('.') if s]
 
     risk = 0.0
 
@@ -547,16 +573,18 @@ def _link_cluster_score(url: str, html: str) -> float:
         soup = BeautifulSoup(html, 'html.parser')
         host = urlparse(url).hostname or ''
 
+        current_reg = _registered_domain(host)
         external_domains: list[str] = []
         for a in soup.find_all('a', href=True):
             href = a['href'].strip()
             if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 continue
             netloc = urlparse(href).netloc
-            if not netloc or host in netloc:
-                continue                              # internal / relative link
-            parts  = netloc.split('.')
-            reg    = '.'.join(parts[-2:]) if len(parts) >= 2 else netloc
+            if not netloc:
+                continue
+            reg = _registered_domain(netloc)
+            if not reg or reg == current_reg:
+                continue                              # internal / same-site link
             external_domains.append(reg.lower())
 
         if len(external_domains) < 5:
@@ -617,16 +645,19 @@ def _get_dominant_domain(url: str, html: str) -> str:
     try:
         soup = BeautifulSoup(html, 'html.parser')
         host = urlparse(url).hostname or ''
+        current_reg = _registered_domain(host)
         external: list[str] = []
         for a in soup.find_all('a', href=True):
             href = a['href'].strip()
             if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 continue
             netloc = urlparse(href).netloc
-            if not netloc or host in netloc:
+            if not netloc:
                 continue
-            parts = netloc.split('.')
-            external.append(('.'.join(parts[-2:]) if len(parts) >= 2 else netloc).lower())
+            reg = _registered_domain(netloc)
+            if not reg or reg == current_reg:
+                continue
+            external.append(reg.lower())
         return Counter(external).most_common(1)[0][0] if external else ''
     except Exception:
         return ''
@@ -715,9 +746,8 @@ def _dead_link_score(url: str, html: str) -> float:
 
         # On a free hosting platform, dead links are a much stronger phishing signal:
         # attacker cloned a page but only wired up the payment/credential form.
-        host  = urlparse(url).hostname or ''
-        parts = host.split('.')
-        reg   = '.'.join(parts[-2:]) if len(parts) >= 2 else host
+        host = urlparse(url).hostname or ''
+        reg  = _registered_domain(host)
         if reg in _HOSTING_PLATFORMS:
             return min(ratio + 0.30, 1.0)   # 50 % dead → 0.80, 100 % dead → 1.0
 

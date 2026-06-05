@@ -5,4 +5,3 @@ onnxruntime==1.18.0
 numpy==1.26.4
 beautifulsoup4==4.12.3
 lxml==5.2.2
-tldextract==5.1.2

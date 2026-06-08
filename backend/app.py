@@ -7,12 +7,11 @@ Five-signal phishing detection pipeline:
   3. Metadata behaviour branch        (DNN, neural)
   4. Brand text impersonation         (keyword matching on visible page text)
   5. Domain age via WHOIS             (newly registered = high risk)
-  6. Visual brand colour detection    (PIL analysis of page screenshot)
+
 
 POST /analyze — stateless, no data written to disk.
 """
 
-import base64
 import io
 import math
 import os
@@ -40,7 +39,6 @@ import numpy as np
 import onnxruntime as ort
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from PIL import Image
 
 from feature_extractor import (
     extract_dom_features,
@@ -358,7 +356,7 @@ def analyze():
     url        = str(body.get('url',        ''))
     dom        = str(body.get('dom',        ''))
     text       = str(body.get('text',       ''))
-    screenshot = str(body.get('screenshot', ''))
+
 
     if _is_trusted(url):
         return jsonify({'threat_score': 0.0, 'verdict': 'safe', 'explanation_details': {
@@ -409,14 +407,14 @@ def analyze():
     age_score          = _domain_age_score(url)          # WHOIS, cached + timeout
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
-    # brand_score is intentionally excluded: text keyword matches are too noisy
-    # to hard-override alone (e.g. a legit page about Chrome will mention "Google").
+    # brand_score is intentionally excluded: text keyword matches are too noisy to
+    # hard-override alone (e.g. a legit page about Chrome will mention "Google").
     if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or broken_link_score >= 0.8 or payment_form_score >= 0.8:
         final_score = max(gov_score, link_score, dead_link_score, broken_link_score, payment_form_score)
     else:
         final_score = (
             0.20 * url_score          +
-            0.05 * age_score          +   # reduced: WHOIS often times out
+            0.05 * age_score          +
             0.20 * dom_score          +
             0.15 * meta_score         +
             0.20 * brand_score        +
@@ -1377,64 +1375,6 @@ def _domain_age_score(url: str) -> float:
     return score
 
 
-# ── 4. Visual brand colour scorer ──────────────────────────────────────────────
-
-# Primary brand colours (R, G, B). Each brand has 1-4 characteristic colours.
-_BRAND_COLOURS: dict[str, list[tuple[int, int, int]]] = {
-    'paypal':    [(0, 48, 135),   (0, 156, 222)],
-    'facebook':  [(24, 119, 242), (66, 103, 178)],
-    'google':    [(66, 133, 244), (234, 67, 53), (251, 188, 4), (52, 168, 83)],
-    'microsoft': [(0, 120, 212),  (255, 67, 0),  (127, 186, 0), (255, 185, 0)],
-    'twitter':   [(29, 161, 242)],
-    'amazon':    [(255, 153, 0),  (35, 47, 62)],
-    'netflix':   [(229, 9, 20)],
-    'linkedin':  [(0, 119, 181)],
-}
-
-_BRAND_COLOUR_DOMAINS: dict[str, list[str]] = {
-    'paypal':    ['paypal.com'],
-    'facebook':  ['facebook.com', 'meta.com'],
-    'google':    ['google.com', 'gmail.com'],
-    'microsoft': ['microsoft.com', 'live.com', 'outlook.com', 'office.com'],
-    'twitter':   ['twitter.com', 'x.com'],
-    'amazon':    ['amazon.com'],
-    'netflix':   ['netflix.com'],
-    'linkedin':  ['linkedin.com'],
-}
-
-def _colour_dist(a: tuple, b: tuple) -> float:
-    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
-
-def _visual_score(url: str, screenshot_b64: str) -> float:
-    """
-    Decode the JPEG screenshot, downsample to 100×75, count pixels that match
-    known brand colour palettes. If a brand's colours dominate the viewport
-    but the URL doesn't belong to that brand, return a high risk score.
-    """
-    if not screenshot_b64:
-        return 0.0
-    try:
-        img_data = base64.b64decode(screenshot_b64)
-        img      = Image.open(io.BytesIO(img_data)).convert('RGB')
-        img      = img.resize((100, 75), Image.LANCZOS)
-        pixels   = list(img.getdata())
-        n        = len(pixels)
-        host     = urlparse(url).hostname or ''
-
-        for brand, colours in _BRAND_COLOURS.items():
-            matched = sum(
-                1 for p in pixels
-                if any(_colour_dist(p, c) < 25 for c in colours)
-            )
-            coverage = matched / n
-            if coverage > 0.28:   # brand colour covers >28 % of the viewport
-                legit = _BRAND_COLOUR_DOMAINS.get(brand, [])
-                if not any(d in host for d in legit):
-                    return min(coverage * 3.0, 1.0)
-        return 0.0
-    except Exception:
-        return 0.0
-
 
 # ── Diagnostic message generators ──────────────────────────────────────────────
 
@@ -1501,13 +1441,6 @@ def _payment_form_message(score: float) -> str:
     if score >= 0.4:
         return 'Page contains payment input fields without a recognized payment processor.'
     return 'No suspicious payment form detected.'
-
-def _visual_message(score: float) -> str:
-    if score >= 0.7:
-        return 'Brand colour signature detected in page screenshot — domain mismatch confirmed.'
-    if score >= 0.3:
-        return 'Partial brand colour match detected in page screenshot.'
-    return 'No brand colour signature detected in visual analysis.'
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

@@ -1247,7 +1247,7 @@ def _gemini_brand_check(url: str, text: str) -> float:
         }).encode()
         req = urllib.request.Request(
             f'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-2.0-flash-lite:generateContent?key={GEMINI_KEY}',
+            f'gemini-3.1-flash-lite:generateContent?key={GEMINI_KEY}',
             data=payload,
             headers={'Content-Type': 'application/json'},
         )

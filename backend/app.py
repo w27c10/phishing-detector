@@ -341,6 +341,7 @@ def analyze():
     brand_score     = _brand_text_score(url, text)
     gov_score       = _gov_impersonation_score(url)
     # Gemini dynamic brand check — only when static brand missed AND other signals elevated
+    print(f'[PhishingDetector] Gemini cond: brand={brand_score} dom={dom_score:.2f} meta={meta_score:.2f} key={bool(GEMINI_KEY)}', flush=True)
     if brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY:
         brand_score = _gemini_brand_check(url, text)
 

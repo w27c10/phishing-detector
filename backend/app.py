@@ -575,6 +575,24 @@ def _gov_impersonation_score(url: str) -> float:
 
 # ── 3. Link cluster impersonation scorer ──────────────────────────────────────
 
+# Contact/social platforms that legitimate sites commonly link to en-masse
+# (e.g. multiple WhatsApp CTA buttons, social media icons in footer).
+# These should never be treated as "dominant external domain" evidence of cloning.
+_CONTACT_PLATFORMS = {
+    'wa.me', 'whatsapp.com',                        # WhatsApp
+    't.me', 'telegram.org', 'telegram.me',          # Telegram
+    'line.me',                                       # Line
+    'facebook.com', 'fb.com', 'fb.me',              # Facebook
+    'instagram.com',                                 # Instagram
+    'twitter.com', 'x.com',                         # Twitter / X
+    'linkedin.com',                                  # LinkedIn
+    'youtube.com', 'youtu.be',                      # YouTube
+    'tiktok.com',                                    # TikTok
+    'pinterest.com',                                 # Pinterest
+    'maps.google.com', 'goo.gl', 'maps.app.goo.gl', # Google Maps
+    'wordpress.org', 'wordpress.com',               # WordPress CMS credits
+}
+
 def _link_cluster_score(url: str, html: str) -> float:
     """
     Returns a high score when the overwhelming majority of external links on
@@ -600,6 +618,10 @@ def _link_cluster_score(url: str, html: str) -> float:
             reg = _reg_domain(netloc)
             if not reg or reg == page_reg:
                 continue                              # internal / same-site link
+            # Skip known contact/social platforms — legitimate sites link to
+            # these en-masse (multiple WhatsApp buttons, social icons, etc.)
+            if netloc.lower() in _CONTACT_PLATFORMS or reg.lower() in _CONTACT_PLATFORMS:
+                continue
             external_domains.append(reg.lower())
 
         if len(external_domains) < 5:

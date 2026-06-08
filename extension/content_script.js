@@ -441,4 +441,65 @@
       host.remove();
     });
   }
+
+  // ── SPA navigation detection ──────────────────────────────────────────────
+  // Hash and pushState navigations don't reload the document, so content
+  // scripts don't re-run. We intercept URL changes and re-trigger analysis.
+
+  let _spaLastUrl = location.href;
+  let _spaTimer   = null;
+
+  function _removeSpaBanners() {
+    ['__phishing_shield_host__', '__phishing_shield_banner_host__']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.remove(); });
+  }
+
+  function _runSpaAnalysis() {
+    const currentUrl = location.href;
+
+    const domCloneSpa = document.documentElement.cloneNode(true);
+    domCloneSpa.querySelectorAll('input').forEach(el => {
+      el.value = ''; el.removeAttribute('value');
+    });
+    let domSpa = domCloneSpa.outerHTML;
+    if (domSpa.length > 500 * 1024) domSpa = domSpa.slice(0, 500 * 1024);
+
+    const textSpa = Array.from(document.querySelectorAll(
+      'title, h1, h2, h3, button[type="submit"], input[type="submit"]'
+    )).map(el => el.innerText || el.value || el.textContent || '').join(' ').slice(0, 2000);
+
+    chrome.runtime.sendMessage(
+      { type: 'analyze', url: currentUrl, dom: domSpa, text: textSpa, spa_navigation: true },
+      (response) => {
+        if (chrome.runtime.lastError || !response) return;
+        console.log('[PhishingDetector] SPA re-analysis:', currentUrl, JSON.stringify(response));
+        if (response.verdict === 'phishing') injectWarning(response);
+        else if (response.verdict === 'suspicious') injectCautionBanner(response);
+      }
+    );
+  }
+
+  function _onSpaNavigation() {
+    const newUrl = location.href;
+    if (newUrl === _spaLastUrl) return;
+    _spaLastUrl = newUrl;
+
+    clearTimeout(_spaTimer);
+    _spaTimer = setTimeout(() => {
+      _removeSpaBanners();
+      _runSpaAnalysis();
+    }, 600);
+  }
+
+  window.addEventListener('hashchange', _onSpaNavigation);
+  window.addEventListener('popstate',   _onSpaNavigation);
+
+  // pushState / replaceState don't fire popstate natively
+  (function () {
+    const _push    = history.pushState.bind(history);
+    const _replace = history.replaceState.bind(history);
+    history.pushState    = function (...a) { _push(...a);    _onSpaNavigation(); };
+    history.replaceState = function (...a) { _replace(...a); _onSpaNavigation(); };
+  })();
+
 })();

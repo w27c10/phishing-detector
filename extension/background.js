@@ -82,8 +82,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== 'analyze') return false;
 
   // If Phase 1 already hard-blocked, skip full analysis.
+  // spa_navigation bypasses this: the user moved to a new SPA route and
+  // needs a fresh verdict, independent of the initial page's early result.
   const early = tabState.get(tabId);
-  if (early && early.verdict === 'phishing') {
+  if (early && early.verdict === 'phishing' && !message.spa_navigation) {
     sendResponse({ verdict: 'phishing', threat_score: 1.0, _skipped: true });
     return false;
   }

@@ -199,6 +199,7 @@
       ['Link Clustering',     exp.link_cluster_factor],
       ['Dead Links',          exp.dead_link_factor],
       ['Broken Links',        exp.broken_link_factor],
+      ['Payment Form',        exp.payment_form_factor],
     ]
       .filter(([, s]) => typeof s === 'number' && s >= 0.5)
       .sort(([, a], [, b]) => b - a)
@@ -424,6 +425,7 @@
             ${renderFactor('Brand Impersonation', exp.brand_threat_factor,    exp.brand_diagnostic_message)}
             ${renderFactor('Domain Age',          exp.domain_age_factor,      exp.domain_age_message)}
             ${renderFactor('Broken Links',        exp.broken_link_factor,     exp.broken_link_message)}
+            ${renderFactor('Payment Form',        exp.payment_form_factor,    exp.payment_form_message)}
             ${renderFactor('Visual Analysis',     exp.visual_threat_factor,   exp.visual_diagnostic_message)}
           </div>
 

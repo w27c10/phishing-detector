@@ -344,24 +344,26 @@ def analyze():
             link_score = 0.0
         elif _llm_partner_check(dom, _get_dominant_domain(url, dom)):      # Layer 2
             link_score = 0.0
-    dead_link_score   = _dead_link_score(url, dom)
-    broken_link_score = _broken_link_score(url, dom)   # HTTP reachability check
-    age_score         = _domain_age_score(url)          # WHOIS, cached + timeout
+    dead_link_score    = _dead_link_score(url, dom)
+    broken_link_score  = _broken_link_score(url, dom)   # HTTP reachability check
+    payment_form_score = _payment_form_score(url, dom)  # Raw CC form without processor
+    age_score          = _domain_age_score(url)          # WHOIS, cached + timeout
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
     # brand_score is intentionally excluded: text keyword matches are too noisy
     # to hard-override alone (e.g. a legit page about Chrome will mention "Google").
-    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or broken_link_score >= 0.8:
-        final_score = max(gov_score, link_score, dead_link_score, broken_link_score)
+    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or broken_link_score >= 0.8 or payment_form_score >= 0.8:
+        final_score = max(gov_score, link_score, dead_link_score, broken_link_score, payment_form_score)
     else:
         final_score = (
-            0.25 * url_score          +
+            0.20 * url_score          +
             0.05 * age_score          +   # reduced: WHOIS often times out
-            0.25 * dom_score          +
+            0.20 * dom_score          +
             0.15 * meta_score         +
             0.20 * brand_score        +
             0.05 * dead_link_score    +
-            0.05 * broken_link_score
+            0.05 * broken_link_score  +
+            0.10 * payment_form_score
         )
 
     # Adaptive threshold: suspicious URL lowers the bar for blocking.
@@ -398,6 +400,8 @@ def analyze():
             'dead_link_message':            _dead_link_message(dead_link_score),
             'broken_link_factor':           round(broken_link_score,    4),
             'broken_link_message':          _broken_link_message(broken_link_score),
+            'payment_form_factor':          round(payment_form_score,   4),
+            'payment_form_message':         _payment_form_message(payment_form_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
         },
@@ -599,6 +603,43 @@ _CONTACT_PLATFORMS = {
     'maps.google.com', 'goo.gl', 'maps.app.goo.gl', # Google Maps
     'wordpress.org', 'wordpress.com',               # WordPress CMS credits
 }
+
+# ── Payment form detection constants ──────────────────────────────────────────
+
+# URL path segments that indicate a payment/checkout page
+_CHECKOUT_PATHS = {'checkout', 'payment', 'pay', 'order', 'billing', 'purchase', 'cart'}
+
+# Known legitimate payment processor domains/scripts
+_PAYMENT_PROCESSORS = {
+    'js.stripe.com', 'q.stripe.com',               # Stripe
+    'paypal.com', 'paypalobjects.com',              # PayPal
+    'braintreegateway.com', 'braintree-api.com',   # Braintree
+    'squareup.com', 'square.com',                  # Square
+    'adyen.com',                                    # Adyen
+    'checkout.com',                                 # Checkout.com
+    'mollie.com',                                   # Mollie
+    '2checkout.com',                               # 2Checkout
+    'authorize.net',                               # Authorize.Net
+    'worldpay.com', 'cybersource.com',             # Worldpay / CyberSource
+    'klarna.com', 'afterpay.com',                  # BNPL
+    # Southeast Asia
+    'billplz.com', 'toyyibpay.com', 'senangpay.my',
+    'ipay88.com', 'razer.com', 'hitpay.com', 'curlec.com',
+    'paydee.my', 'payex.com.my',
+}
+
+# Input field patterns specific to credit card forms
+_CC_INPUT_INDICATORS = [
+    r'autocomplete=["\']cc-number["\']',
+    r'(?:name|id)=["\'][^"\']*(?:card[_\-]?num|cc[_\-]?num|cardno|ccno|credit[_\-]?card)[^"\']*["\']',
+    r'placeholder=["\'][^"\']*(?:card\s*number|\d{4}\s+\d{4})[^"\']*["\']',
+]
+
+_CVV_INDICATORS = [
+    r'autocomplete=["\']cc-csc["\']',
+    r'(?:name|id)=["\'][^"\']*(?:cvv|cvc|cvc2|security[_\-]?code|card[_\-]?code)[^"\']*["\']',
+    r'placeholder=["\'][^"\']*(?:cvv|cvc\b|security\s*code)[^"\']*["\']',
+]
 
 def _link_cluster_score(url: str, html: str) -> float:
     """
@@ -880,6 +921,47 @@ def _broken_link_score(url: str, dom: str) -> float:
 
     except Exception:
         return 0.0
+
+
+# ── 5c. Payment form scorer ───────────────────────────────────────────────────
+
+def _payment_form_score(url: str, dom: str) -> float:
+    """
+    Detects pages that collect raw credit card details without a recognized
+    payment processor. Triggers only when:
+      (a) the URL path contains a checkout/payment keyword, OR
+      (b) the DOM contains credit card input field attributes.
+
+    Returns 0.8 if both card number AND CVV fields are found without a processor,
+    0.4 if only one type found, 0.0 otherwise.
+    """
+    if not dom:
+        return 0.0
+
+    dom_lower = dom.lower()
+
+    # Trigger condition A: is this a payment-related page by URL?
+    path_parts = set(urlparse(url).path.lower().strip('/').split('/'))
+    is_checkout_page = bool(path_parts & _CHECKOUT_PATHS)
+
+    # Trigger condition B: does DOM have CC input fields?
+    has_cc  = any(re.search(p, dom_lower) for p in _CC_INPUT_INDICATORS)
+    has_cvv = any(re.search(p, dom_lower) for p in _CVV_INDICATORS)
+
+    # Skip entirely if neither condition is met
+    if not (is_checkout_page or has_cc or has_cvv):
+        return 0.0
+
+    # Safe if a recognized payment processor script/iframe is present
+    if any(proc in dom_lower for proc in _PAYMENT_PROCESSORS):
+        return 0.0
+
+    if has_cc and has_cvv:
+        return 0.8    # Both card number + CVV fields with no processor → high risk
+    if has_cc or has_cvv:
+        return 0.4    # Only one type found → moderate risk
+    # Checkout URL but no raw CC fields (e.g. redirects to hosted payment page)
+    return 0.0
 
 
 # ── 5. Brand text impersonation scorer ─────────────────────────────────────────
@@ -1266,6 +1348,13 @@ def _age_message(score: float) -> str:
     if score >= 0.40:
         return 'Domain registered within the last 6 months — moderate risk.'
     return 'Domain has sufficient registration history.'
+
+def _payment_form_message(score: float) -> str:
+    if score >= 0.8:
+        return 'Page collects raw credit card details without a recognized payment processor.'
+    if score >= 0.4:
+        return 'Page contains payment input fields without a recognized payment processor.'
+    return 'No suspicious payment form detected.'
 
 def _visual_message(score: float) -> str:
     if score >= 0.7:

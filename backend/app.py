@@ -341,7 +341,6 @@ def analyze():
     brand_score     = _brand_text_score(url, text)
     gov_score       = _gov_impersonation_score(url)
     # Gemini dynamic brand check — only when static brand missed AND other signals elevated
-    print(f'[PhishingDetector] Gemini cond: brand={brand_score} dom={dom_score:.2f} meta={meta_score:.2f} key={bool(GEMINI_KEY)}', flush=True)
     if brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY:
         brand_score = _gemini_brand_check(url, text)
 
@@ -373,6 +372,17 @@ def analyze():
             0.05 * broken_link_score  +
             0.10 * payment_form_score
         )
+
+    # Triple-signal hard override: brand + meta + dom + url all high simultaneously
+    # is a near-certain phishing indicator that fusion weights alone underweight.
+    # url_score >= 0.10 guards against false positives on legitimate OAuth pages
+    # (which have url_score ≈ 0 on clean domains).
+    _triple_signal = (brand_score >= 0.8 and
+                      meta_score  >= 0.8 and
+                      dom_score   >= 0.8 and
+                      url_score   >= 0.10)
+    if _triple_signal:
+        final_score = max(final_score, 0.85)
 
     # Adaptive threshold: suspicious URL lowers the bar for blocking.
     # When brand + metadata both fire at high confidence, tighten threshold:

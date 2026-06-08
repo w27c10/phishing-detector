@@ -12,6 +12,7 @@ Five-signal phishing detection pipeline:
 POST /analyze — stateless, no data written to disk.
 """
 
+import concurrent.futures
 import io
 import math
 import os
@@ -390,21 +391,31 @@ def analyze():
     url_score       = _rule_url_score(url)
     brand_score     = _brand_text_score(url, text)
     gov_score       = _gov_impersonation_score(url)
-    # Gemini dynamic brand check — only when static brand missed AND other signals elevated
-    if brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY:
-        brand_score = _gemini_brand_check(url, text)
-
     link_score      = _link_cluster_score(url, dom)
+    payment_form_score = _payment_form_score(url, dom)  # Raw CC form without processor
+
+    # ── Parallel I/O-bound checks ───────────────────────────────────────────────
+    # WHOIS, Gemini, dead-link, and broken-link are all network calls that are
+    # independent of each other — run them concurrently to cut latency.
+    _run_gemini = brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
+        _f_age    = _pool.submit(_domain_age_score, url)
+        _f_dead   = _pool.submit(_dead_link_score, url, dom)
+        _f_broken = _pool.submit(_broken_link_score, url, dom)
+        _f_gemini = _pool.submit(_gemini_brand_check, url, text) if _run_gemini else None
+
+        age_score         = _f_age.result()
+        dead_link_score   = _f_dead.result()
+        broken_link_score = _f_broken.result()
+        if _f_gemini is not None:
+            brand_score = _f_gemini.result()
+
     # NLP two-layer partner check: suppress false positives for legitimate dealers
     if link_score >= 0.8:
         if _is_brand_partner(dom):                                          # Layer 1
             link_score = 0.0
         elif _llm_partner_check(dom, _get_dominant_domain(url, dom)):      # Layer 2
             link_score = 0.0
-    dead_link_score    = _dead_link_score(url, dom)
-    broken_link_score  = _broken_link_score(url, dom)   # HTTP reachability check
-    payment_form_score = _payment_form_score(url, dom)  # Raw CC form without processor
-    age_score          = _domain_age_score(url)          # WHOIS, cached + timeout
     # ── Scenario detection ─────────────────────────────────────────────────────
     _scenarios: list[str] = []
     if brand_score >= 0.5:

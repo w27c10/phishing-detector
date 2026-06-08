@@ -80,6 +80,9 @@ _SB_KEY       = os.environ.get('SAFE_BROWSING_KEY', '')
 _sb_cache:  dict[str, tuple[float, float]] = {}   # url → (score, timestamp)
 _SB_TTL       = 1800   # cache results 30 min (Google's recommended minimum)
 
+_gemini_brand_cache: dict[str, tuple[float, float]] = {}  # url → (score, timestamp)
+_GEMINI_BRAND_TTL = 1800
+
 def _safe_browsing_score(url: str) -> float:
     """
     Queries Google Safe Browsing Lookup API v4.
@@ -337,6 +340,10 @@ def analyze():
     url_score       = _rule_url_score(url)
     brand_score     = _brand_text_score(url, text)
     gov_score       = _gov_impersonation_score(url)
+    # Gemini dynamic brand check — only when static brand missed AND other signals elevated
+    if brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY:
+        brand_score = _gemini_brand_check(url, text)
+
     link_score      = _link_cluster_score(url, dom)
     # NLP two-layer partner check: suppress false positives for legitimate dealers
     if link_score >= 0.8:
@@ -1193,6 +1200,82 @@ def _brand_text_score(url: str, text: str) -> float:
     return 0.0
 
 
+# ── 5d. Gemini dynamic brand impersonation check ──────────────────────────────
+
+def _gemini_brand_check(url: str, text: str) -> float:
+    """
+    Asks Gemini whether the page is impersonating a real organization or brand.
+    Covers fake login pages, fake stores, fake support, fake investment platforms,
+    and any page that misrepresents its true owner or affiliation.
+
+    Only called when:
+      - Static _brand_text_score returned 0 (known brands not matched)
+      - At least one other signal is elevated (dom >= 0.6 OR meta >= 0.6)
+      - GEMINI_KEY is set
+
+    Results cached 30 minutes to stay within free API quota.
+    Returns 1.0 if impersonation detected, 0.0 otherwise.
+    """
+    if not GEMINI_KEY or not text.strip():
+        return 0.0
+
+    now = time.time()
+    if url in _gemini_brand_cache:
+        score, ts = _gemini_brand_cache[url]
+        if now - ts < _GEMINI_BRAND_TTL:
+            return score
+
+    host       = urlparse(url).hostname or ''
+    clean_text = ' '.join(text.split())[:600]
+
+    prompt = (
+        f'Page text: "{clean_text}"\n'
+        f'Domain: {host}\n\n'
+        f'Is this page impersonating or falsely claiming affiliation with '
+        f'a real organization, brand, company, or official service?\n\n'
+        f'This includes: fake login pages, fake online stores claiming to sell '
+        f'official products, fake customer support, fake investment platforms, '
+        f'fake government services, or any page that misrepresents its true '
+        f'owner or affiliation.\n\n'
+        f'If yes, reply: YES [organization name]\n'
+        f'If no, reply: NO'
+    )
+
+    try:
+        payload = json.dumps({
+            'contents': [{'parts': [{'text': prompt}]}]
+        }).encode()
+        req = urllib.request.Request(
+            f'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'gemini-1.5-flash:generateContent?key={GEMINI_KEY}',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
+        print(f'[PhishingDetector] Gemini brand check → {answer!r} ({host})')
+
+        if answer.upper().startswith('YES'):
+            # Extract brand name from "YES [Koinly]" or "YES Koinly"
+            match = re.search(r'YES\s*\[?([^\]\n,]+)', answer, re.IGNORECASE)
+            if match:
+                brand_name = match.group(1).strip().lower()
+                # Safe if the brand name is part of the actual domain
+                score = 0.0 if brand_name and brand_name in host.lower() else 1.0
+            else:
+                score = 1.0   # YES with no extractable name — still flag
+        else:
+            score = 0.0
+
+    except Exception as exc:
+        print(f'[PhishingDetector] Gemini brand check failed: {exc}')
+        score = 0.0
+
+    _gemini_brand_cache[url] = (score, now)
+    return score
+
+
 # ── 3. Domain age scorer (WHOIS) ───────────────────────────────────────────────
 
 def _whois_lookup(domain: str) -> float:
@@ -1322,8 +1405,8 @@ def _meta_message(score: float) -> str:
 
 def _brand_message(score: float) -> str:
     if score >= 0.8:
-        return 'Brand name detected in page content — domain does not belong to that brand.'
-    return 'No brand impersonation detected in visible page text.'
+        return 'Page identified as impersonating a real brand or organization.'
+    return 'No brand impersonation detected.'
 
 def _dead_link_message(score: float) -> str:
     if score >= 0.5:

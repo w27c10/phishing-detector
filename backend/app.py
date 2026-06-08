@@ -70,6 +70,9 @@ except Exception as exc:
 _whois_pool  = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _whois_cache: dict[str, float] = {}
 
+# Separate pool for HTTP link-reachability checks (avoid starving WHOIS workers)
+_link_check_pool = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+
 
 # ── Google Safe Browsing API ───────────────────────────────────────────────────
 
@@ -341,22 +344,24 @@ def analyze():
             link_score = 0.0
         elif _llm_partner_check(dom, _get_dominant_domain(url, dom)):      # Layer 2
             link_score = 0.0
-    dead_link_score = _dead_link_score(url, dom)
-    age_score       = _domain_age_score(url)        # WHOIS, cached + timeout
+    dead_link_score   = _dead_link_score(url, dom)
+    broken_link_score = _broken_link_score(url, dom)   # HTTP reachability check
+    age_score         = _domain_age_score(url)          # WHOIS, cached + timeout
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
     # brand_score is intentionally excluded: text keyword matches are too noisy
     # to hard-override alone (e.g. a legit page about Chrome will mention "Google").
-    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8:
-        final_score = max(gov_score, link_score, dead_link_score)
+    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or broken_link_score >= 0.8:
+        final_score = max(gov_score, link_score, dead_link_score, broken_link_score)
     else:
         final_score = (
-            0.25 * url_score        +
-            0.10 * age_score        +
-            0.25 * dom_score        +
-            0.15 * meta_score       +
-            0.20 * brand_score      +
-            0.05 * dead_link_score
+            0.25 * url_score          +
+            0.05 * age_score          +   # reduced: WHOIS often times out
+            0.25 * dom_score          +
+            0.15 * meta_score         +
+            0.20 * brand_score        +
+            0.05 * dead_link_score    +
+            0.05 * broken_link_score
         )
 
     # Adaptive threshold: suspicious URL lowers the bar for blocking.
@@ -389,8 +394,10 @@ def analyze():
             'gov_impersonation_message':    _gov_message(gov_score),
             'link_cluster_factor':          round(link_score,        4),
             'link_cluster_message':         _link_cluster_message(link_score),
-            'dead_link_factor':             round(dead_link_score,   4),
+            'dead_link_factor':             round(dead_link_score,      4),
             'dead_link_message':            _dead_link_message(dead_link_score),
+            'broken_link_factor':           round(broken_link_score,    4),
+            'broken_link_message':          _broken_link_message(broken_link_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
         },
@@ -791,6 +798,90 @@ def _dead_link_score(url: str, html: str) -> float:
         return 0.0
 
 
+# ── 5b. HTTP link reachability scorer ─────────────────────────────────────────
+
+def _broken_link_score(url: str, dom: str) -> float:
+    """
+    Samples up to 5 same-site links and checks whether they return valid HTTP
+    responses. A cloned phishing page typically only wires up the credential
+    form; other navigation links return 404/502 or a bare nginx/Apache default.
+
+    Runs HEAD requests in parallel with a hard 3-second wall-clock cap.
+    Returns the ratio of broken links if >= 50%, else 0.
+    """
+    if not dom:
+        return 0.0
+    try:
+        soup = BeautifulSoup(dom, 'html.parser')
+        parsed_base = urlparse(url)
+        host   = parsed_base.hostname or ''
+        base   = f"{parsed_base.scheme}://{host}"
+        page_reg = _reg_domain(host)
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for a in soup.find_all('a', href=True):
+            href = a['href'].strip()
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
+            if href.startswith('/'):
+                full = base + href
+            elif href.startswith('http'):
+                full = href
+            else:
+                continue
+            link_host = urlparse(full).hostname or ''
+            if _reg_domain(link_host) != page_reg:
+                continue          # external link — skip
+            norm = full.split('?')[0].rstrip('/')
+            if norm in seen:
+                continue
+            seen.add(norm)
+            candidates.append(full)
+            if len(candidates) >= 5:
+                break
+
+        if len(candidates) < 3:
+            return 0.0
+
+        def _head(link_url: str) -> bool:
+            """True if link is reachable (2xx / 3xx / 405 Method Not Allowed)."""
+            try:
+                req = urllib.request.Request(
+                    link_url,
+                    method='HEAD',
+                    headers={'User-Agent': 'Mozilla/5.0 (compatible; PhishingDetector/1.0)'},
+                )
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    return resp.status < 400
+            except urllib.error.HTTPError as e:
+                # 405 = server alive but rejects HEAD — count as reachable
+                return e.code == 405 or e.code < 400
+            except Exception:
+                return False   # timeout, connection refused, etc.
+
+        futures = [_link_check_pool.submit(_head, lnk) for lnk in candidates]
+        ok = 0
+        deadline = time.time() + 3.0
+        try:
+            for fut in concurrent.futures.as_completed(futures, timeout=max(0.1, deadline - time.time())):
+                try:
+                    if fut.result():
+                        ok += 1
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError:
+            pass
+
+        total = len(candidates)
+        ratio = (total - ok) / total
+        print(f'[PhishingDetector] link-check {url}: {ok}/{total} reachable → broken={ratio:.2f}')
+        return round(ratio, 4) if ratio >= 0.5 else 0.0
+
+    except Exception:
+        return 0.0
+
+
 # ── 5. Brand text impersonation scorer ─────────────────────────────────────────
 
 # Maps brand keywords to their legitimate domain suffixes.
@@ -1118,6 +1209,13 @@ def _visual_score(url: str, screenshot_b64: str) -> float:
 
 
 # ── Diagnostic message generators ──────────────────────────────────────────────
+
+def _broken_link_message(score: float) -> str:
+    if score >= 0.8:
+        return f'~{round(score * 100)}% of same-site links are unreachable — page is likely a cloned template.'
+    if score >= 0.5:
+        return f'~{round(score * 100)}% of same-site links returned errors — elevated suspicion.'
+    return 'Same-site links appear reachable.'
 
 def _url_message(score: float) -> str:
     if score >= 0.75:

@@ -198,6 +198,7 @@
       ['Domain Age',          exp.domain_age_factor],
       ['Link Clustering',     exp.link_cluster_factor],
       ['Dead Links',          exp.dead_link_factor],
+      ['Broken Links',        exp.broken_link_factor],
     ]
       .filter(([, s]) => typeof s === 'number' && s >= 0.5)
       .sort(([, a], [, b]) => b - a)
@@ -417,12 +418,13 @@
           </div>
 
           <div class="factors">
-            ${renderFactor('URL Analysis',        exp.url_threat_factor,    exp.url_diagnostic_message)}
-            ${renderFactor('Page Structure',      exp.dom_threat_factor,    exp.dom_diagnostic_message)}
+            ${renderFactor('URL Analysis',        exp.url_threat_factor,      exp.url_diagnostic_message)}
+            ${renderFactor('Page Structure',      exp.dom_threat_factor,      exp.dom_diagnostic_message)}
             ${renderFactor('Metadata Behaviour',  exp.metadata_threat_factor, exp.metadata_diagnostic_message)}
-            ${renderFactor('Brand Impersonation', exp.brand_threat_factor,  exp.brand_diagnostic_message)}
-            ${renderFactor('Domain Age',          exp.domain_age_factor,    exp.domain_age_message)}
-            ${renderFactor('Visual Analysis',     exp.visual_threat_factor, exp.visual_diagnostic_message)}
+            ${renderFactor('Brand Impersonation', exp.brand_threat_factor,    exp.brand_diagnostic_message)}
+            ${renderFactor('Domain Age',          exp.domain_age_factor,      exp.domain_age_message)}
+            ${renderFactor('Broken Links',        exp.broken_link_factor,     exp.broken_link_message)}
+            ${renderFactor('Visual Analysis',     exp.visual_threat_factor,   exp.visual_diagnostic_message)}
           </div>
 
           <div class="buttons">

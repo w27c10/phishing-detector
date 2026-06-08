@@ -173,17 +173,32 @@ _POPULAR_CACHE   = os.path.join(os.path.dirname(__file__), '.popular_domains.txt
 _POPULAR_TOP_N   = 10_000
 
 
-def _fetch_tranco() -> set[str]:
-    """Download Tranco Top-N from their public permalink."""
+def _fetch_tranco_domains() -> set[str]:
+    """
+    Fetch Tranco top domains via two-step:
+    1. GET /latest_list to parse the current list ID.
+    2. Stream /download/{ID}/full (raw CSV, rank,domain) up to _POPULAR_TOP_N rows.
+    """
     try:
-        req = urllib.request.Request(
-            'https://tranco-list.eu/download/latest/full',
+        id_req = urllib.request.Request(
+            'https://tranco-list.eu/latest_list',
             headers={'User-Agent': 'PhishingDetector/1.0 (research)'},
         )
+        with urllib.request.urlopen(id_req, timeout=10) as resp:
+            html = resp.read().decode('utf-8', errors='ignore')
+        m = re.search(r'list with ID\s+([A-Z0-9]+)', html, re.IGNORECASE)
+        if not m:
+            print('[PhishingDetector] Tranco: could not parse list ID', flush=True)
+            return set()
+        list_id = m.group(1)
+        csv_url = f'https://tranco-list.eu/download/{list_id}/full'
+        csv_req = urllib.request.Request(
+            csv_url, headers={'User-Agent': 'PhishingDetector/1.0 (research)'},
+        )
         domains: set[str] = set()
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            for i, line in enumerate(io.TextIOWrapper(resp)):
-                if i >= _POPULAR_TOP_N:
+        with urllib.request.urlopen(csv_req, timeout=30) as resp:
+            for line in io.TextIOWrapper(resp):
+                if len(domains) >= _POPULAR_TOP_N:
                     break
                 parts = line.strip().split(',')
                 if len(parts) >= 2:
@@ -192,8 +207,45 @@ def _fetch_tranco() -> set[str]:
                         domains.add(d)
         return domains
     except Exception as exc:
-        print(f'[PhishingDetector] Tranco fetch failed: {exc}')
+        print(f'[PhishingDetector] Tranco fetch failed: {exc}', flush=True)
         return set()
+
+
+def _fetch_popular_domains() -> set[str]:
+    """Download top domains from Majestic Million (primary) or Tranco (fallback)."""
+    # Majestic Million — stable direct CSV, format: GlobalRank,TldRank,Domain,...
+    try:
+        req = urllib.request.Request(
+            'https://downloads.majestic.com/majestic_million.csv',
+            headers={'User-Agent': 'PhishingDetector/1.0 (research)'},
+        )
+        domains: set[str] = set()
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            for i, line in enumerate(io.TextIOWrapper(resp)):
+                if i == 0:
+                    continue          # skip CSV header row
+                if len(domains) >= _POPULAR_TOP_N:
+                    break
+                parts = line.strip().split(',')
+                if len(parts) > 2:
+                    d = parts[2].strip().lower()
+                    if d and d not in _HOSTING_PLATFORMS:
+                        domains.add(d)
+        if domains:
+            print(f'[PhishingDetector] Popular domains loaded: {len(domains)} from Majestic', flush=True)
+            return domains
+    except Exception as exc:
+        print(f'[PhishingDetector] Majestic fetch failed: {exc}', flush=True)
+
+    # Tranco fallback
+    domains = _fetch_tranco_domains()
+    if domains:
+        print(f'[PhishingDetector] Popular domains loaded: {len(domains)} from Tranco', flush=True)
+    return domains
+
+
+# Keep old name as alias so _popular_refresh_loop still works
+_fetch_tranco = _fetch_popular_domains
 
 
 def _load_popular_cache() -> set[str]:

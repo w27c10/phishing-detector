@@ -462,6 +462,11 @@ def analyze():
     if _triple_signal:
         final_score = max(final_score, 0.85)
 
+    # Brand + DOM override: Gemini-confirmed impersonation + phishing DOM structure
+    # is sufficient for phishing even without meta/url signals.
+    if brand_score >= 0.8 and dom_score >= 0.8:
+        final_score = max(final_score, 0.85)
+
     # Adaptive threshold: suspicious URL lowers the bar for blocking.
     # When brand + metadata both fire at high confidence, tighten threshold:
     # these two signals together reliably indicate phishing even when DOM

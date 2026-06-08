@@ -405,6 +405,26 @@ def analyze():
     broken_link_score  = _broken_link_score(url, dom)   # HTTP reachability check
     payment_form_score = _payment_form_score(url, dom)  # Raw CC form without processor
     age_score          = _domain_age_score(url)          # WHOIS, cached + timeout
+    # ── Scenario detection ─────────────────────────────────────────────────────
+    _scenarios: list[str] = []
+    if brand_score >= 0.5:
+        _scenarios.append('brand')
+    if age_score >= 0.8 and (payment_form_score >= 0.4 or meta_score >= 0.6):
+        _scenarios.append('new_financial')
+    if len(_scenarios) >= 2:
+        _scenario = 'high_risk'
+    else:
+        _scenario = _scenarios[0] if _scenarios else 'default'
+
+    # ── Scenario weights ───────────────────────────────────────────────────────
+    _W = {
+        'default':       (0.20, 0.05, 0.20, 0.15, 0.20, 0.05, 0.05, 0.10),
+        'brand':         (0.20, 0.05, 0.20, 0.15, 0.35, 0.02, 0.02, 0.01),
+        'new_financial': (0.15, 0.25, 0.15, 0.15, 0.10, 0.08, 0.07, 0.05),
+        'high_risk':     (0.15, 0.20, 0.15, 0.15, 0.15, 0.07, 0.06, 0.07),
+    }
+    _wu, _wa, _wd, _wm, _wb, _wdl, _wbl, _wp = _W[_scenario]
+
     # ── Fusion ─────────────────────────────────────────────────────────────────
     # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
     # brand_score is intentionally excluded: text keyword matches are too noisy to
@@ -413,15 +433,23 @@ def analyze():
         final_score = max(gov_score, link_score, dead_link_score, broken_link_score, payment_form_score)
     else:
         final_score = (
-            0.20 * url_score          +
-            0.05 * age_score          +
-            0.20 * dom_score          +
-            0.15 * meta_score         +
-            0.20 * brand_score        +
-            0.05 * dead_link_score    +
-            0.05 * broken_link_score  +
-            0.10 * payment_form_score
+            _wu  * url_score          +
+            _wa  * age_score          +
+            _wd  * dom_score          +
+            _wm  * meta_score         +
+            _wb  * brand_score        +
+            _wdl * dead_link_score    +
+            _wbl * broken_link_score  +
+            _wp  * payment_form_score
         )
+
+    # ── Scenario overrides (floor) ─────────────────────────────────────────────
+    # new_financial: new domain + dead links or payment form → at least suspicious
+    if _scenario == 'new_financial' and (dead_link_score >= 0.4 or payment_form_score >= 0.4):
+        final_score = max(final_score, 0.60)
+    # high_risk: brand impersonation on a new financial domain → phishing
+    if _scenario == 'high_risk':
+        final_score = max(final_score, 0.75)
 
     # Triple-signal hard override: brand + meta + dom + url all high simultaneously
     # is a near-certain phishing indicator that fusion weights alone underweight.
@@ -472,6 +500,7 @@ def analyze():
             'payment_form_message':         _payment_form_message(payment_form_score),
             'domain_age_factor':            round(age_score,    4),
             'domain_age_message':           _age_message(age_score),
+            'scoring_scenario':             _scenario,
         },
     })
 

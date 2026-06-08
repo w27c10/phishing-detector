@@ -344,16 +344,18 @@ def analyze():
     dead_link_score = _dead_link_score(url, dom)
     age_score       = _domain_age_score(url)        # WHOIS, cached + timeout
     # ── Fusion ─────────────────────────────────────────────────────────────────
-    # Hard overrides — any one firing confidently means phishing.
-    if brand_score >= 0.8 or gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8:
-        final_score = max(brand_score, gov_score, link_score, dead_link_score)
+    # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
+    # brand_score is intentionally excluded: text keyword matches are too noisy
+    # to hard-override alone (e.g. a legit page about Chrome will mention "Google").
+    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8:
+        final_score = max(gov_score, link_score, dead_link_score)
     else:
         final_score = (
             0.25 * url_score        +
-            0.20 * age_score        +
+            0.10 * age_score        +
             0.25 * dom_score        +
             0.15 * meta_score       +
-            0.10 * brand_score      +
+            0.20 * brand_score      +
             0.05 * dead_link_score
         )
 
@@ -976,12 +978,17 @@ def _brand_text_score(url: str, text: str) -> float:
     """
     host       = urlparse(url).hostname or ''
     text_lower = text.lower()
+    reg_domain = _reg_domain(host).lower()
 
     for brand, legit_domains in _BRAND_DOMAINS.items():
         pattern   = r'\b' + re.escape(brand) + r'\b'
         min_count = 2 if brand in _AMBIGUOUS_BRANDS else 1
         if len(re.findall(pattern, text_lower)) >= min_count:
             if not any(d in host for d in legit_domains):
+                # Skip if the brand name IS the registered domain
+                # e.g. 'google' in 'google.dev' → legitimate Google property
+                if re.search(pattern, reg_domain):
+                    continue
                 return 1.0
     return 0.0
 

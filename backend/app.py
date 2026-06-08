@@ -467,7 +467,12 @@ def analyze():
     # these two signals together reliably indicate phishing even when DOM
     # score is slightly lower (e.g. SPA pages that render credentials lazily).
     _strong_signals = brand_score >= 0.8 and meta_score >= 0.8
-    _base = 0.70 if _strong_signals else 0.75
+    if _scenario in ('new_financial', 'high_risk'):
+        _base = 0.60
+    elif _strong_signals:
+        _base = 0.70
+    else:
+        _base = 0.75
     threshold = max(0.40, _base - url_score * 0.50)
     if final_score >= threshold:
         verdict = 'phishing'

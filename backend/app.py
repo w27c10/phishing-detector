@@ -359,8 +359,13 @@ def analyze():
             0.05 * dead_link_score
         )
 
-    # Adaptive threshold: suspicious URL lowers the bar for blocking
-    threshold = max(0.40, 0.75 - url_score * 0.50)
+    # Adaptive threshold: suspicious URL lowers the bar for blocking.
+    # When brand + metadata both fire at high confidence, tighten threshold:
+    # these two signals together reliably indicate phishing even when DOM
+    # score is slightly lower (e.g. SPA pages that render credentials lazily).
+    _strong_signals = brand_score >= 0.8 and meta_score >= 0.8
+    _base = 0.70 if _strong_signals else 0.75
+    threshold = max(0.40, _base - url_score * 0.50)
     if final_score >= threshold:
         verdict = 'phishing'
     elif final_score >= 0.35:

@@ -122,7 +122,7 @@
   }
 
   function renderFactor(label, score, message) {
-    if (score === undefined || score === null) return '';
+    if (!score) return '';   // hide 0% and undefined/null factors
     const pct = Math.round(score * 100);
     const cls = riskClass(score);
     return `

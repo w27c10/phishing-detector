@@ -488,7 +488,7 @@
     _spaTimer = setTimeout(() => {
       _removeSpaBanners();
       _runSpaAnalysis();
-    }, 600);
+    }, 1200);
   }
 
   window.addEventListener('hashchange', _onSpaNavigation);

@@ -1254,7 +1254,7 @@ def _gemini_brand_check(url: str, text: str) -> float:
         with urllib.request.urlopen(req, timeout=5) as resp:
             result = json.loads(resp.read())
         answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
-        print(f'[PhishingDetector] Gemini brand check → {answer!r} ({host})')
+        print(f'[PhishingDetector] Gemini brand check → {answer!r} ({host})', flush=True)
 
         if answer.upper().startswith('YES'):
             # Extract brand name from "YES [Koinly]" or "YES Koinly"
@@ -1269,7 +1269,7 @@ def _gemini_brand_check(url: str, text: str) -> float:
             score = 0.0
 
     except Exception as exc:
-        print(f'[PhishingDetector] Gemini brand check failed: {exc}')
+        print(f'[PhishingDetector] Gemini brand check failed: {type(exc).__name__}: {exc}', flush=True)
         score = 0.0
 
     _gemini_brand_cache[url] = (score, now)

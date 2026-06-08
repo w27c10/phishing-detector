@@ -16,6 +16,18 @@ const API_URL_ONLY = 'https://phishing-detector-production-dd47.up.railway.app/a
 // { tabId → { url: string, verdict: string } }
 const tabState = new Map();
 
+// Detect SPA pushState navigation (Vue Router, React Router, etc.) and
+// notify the content script to re-analyse. onHistoryStateUpdated fires for
+// every history.pushState call in the page — it runs in the browser process
+// so it is not affected by the content script's isolated JS world.
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  if (details.frameId !== 0) return; // main frame only
+  chrome.tabs.sendMessage(details.tabId, {
+    type: 'spa_url_changed',
+    url:  details.url,
+  }).catch(() => {}); // tab may not have a content script yet
+});
+
 // Inject content script into blob: pages — these are invisible to the
 // manifest content_scripts declaration which only matches http/https.
 // Phishing pages often open as blob: URLs to evade URL-based detection.

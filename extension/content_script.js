@@ -494,12 +494,11 @@
   window.addEventListener('hashchange', _onSpaNavigation);
   window.addEventListener('popstate',   _onSpaNavigation);
 
-  // pushState / replaceState don't fire popstate natively
-  (function () {
-    const _push    = history.pushState.bind(history);
-    const _replace = history.replaceState.bind(history);
-    history.pushState    = function (...a) { _push(...a);    _onSpaNavigation(); };
-    history.replaceState = function (...a) { _replace(...a); _onSpaNavigation(); };
-  })();
+  // pushState / replaceState: intercepted via background's
+  // onHistoryStateUpdated (runs in browser process, not isolated JS world).
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'spa_url_changed') _onSpaNavigation();
+    return false;
+  });
 
 })();

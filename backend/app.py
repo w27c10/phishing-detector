@@ -735,6 +735,13 @@ _PAYMENT_PROCESSORS = {
     'paydee.my', 'payex.com.my',
 }
 
+# Crypto wallet address input field patterns
+_WALLET_INDICATORS = [
+    r'placeholder=["\'][^"\']*(?:wallet\s*address|erc20|bep20|trc20|0x[0-9a-f]{4}|crypto\s*address)[^"\']*["\']',
+    r'(?:name|id)=["\'][^"\']*(?:wallet[_\-]?addr|crypto[_\-]?addr|erc20|bep20)[^"\']*["\']',
+    r'placeholder=["\'][^"\']*(?:enter\s*your\s*wallet|deposit\s*address|receiving\s*address)[^"\']*["\']',
+]
+
 # Input field patterns specific to credit card forms
 _CC_INPUT_INDICATORS = [
     r'autocomplete=["\']cc-number["\']',
@@ -1034,19 +1041,25 @@ def _broken_link_score(url: str, dom: str) -> float:
 
 def _payment_form_score(url: str, dom: str) -> float:
     """
-    Detects pages that collect raw credit card details without a recognized
-    payment processor. Triggers only when:
-      (a) the URL path contains a checkout/payment keyword, OR
-      (b) the DOM contains credit card input field attributes.
+    Detects pages that collect raw financial credentials without a recognized
+    payment processor. Covers three attack types:
+      (a) Credit card harvesting: card number + CVV fields
+      (b) Crypto wallet harvesting: wallet address input fields
 
-    Returns 0.8 if both card number AND CVV fields are found without a processor,
-    0.4 if only one type found, 0.0 otherwise.
+    Returns 0.8 for high-confidence matches, 0.4 for partial matches, 0.7 for
+    crypto wallet inputs, 0.0 otherwise.
     """
     if not dom:
         return 0.0
 
     dom_lower = dom.lower()
 
+    # ── Crypto wallet detection (independent of checkout path) ────────────────
+    has_wallet = any(re.search(p, dom_lower) for p in _WALLET_INDICATORS)
+    if has_wallet:
+        return 0.7
+
+    # ── Credit card detection ─────────────────────────────────────────────────
     # Trigger condition A: is this a payment-related page by URL?
     path_parts = set(urlparse(url).path.lower().strip('/').split('/'))
     is_checkout_page = bool(path_parts & _CHECKOUT_PATHS)
@@ -1477,6 +1490,8 @@ def _age_message(score: float) -> str:
 def _payment_form_message(score: float) -> str:
     if score >= 0.8:
         return 'Page collects raw credit card details without a recognized payment processor.'
+    if score >= 0.7:
+        return 'Page contains crypto wallet address input fields — possible wallet harvesting.'
     if score >= 0.4:
         return 'Page contains payment input fields without a recognized payment processor.'
     return 'No suspicious payment form detected.'

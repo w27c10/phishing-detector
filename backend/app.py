@@ -440,8 +440,8 @@ def analyze():
     # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
     # brand_score is intentionally excluded: text keyword matches are too noisy to
     # hard-override alone (e.g. a legit page about Chrome will mention "Google").
-    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or broken_link_score >= 0.8 or payment_form_score >= 0.8:
-        final_score = max(gov_score, link_score, dead_link_score, broken_link_score, payment_form_score)
+    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or payment_form_score >= 0.8:
+        final_score = max(gov_score, link_score, dead_link_score, payment_form_score)
     else:
         final_score = (
             _wu  * url_score          +

@@ -50,7 +50,10 @@
   // Google Safe Browsing and other production phishing filters.
 
   const TRUSTED_DOMAINS = new Set([
-
+    'google.com', 'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
+    'instagram.com', 'linkedin.com', 'github.com', 'apple.com', 'microsoft.com',
+    'amazon.com', 'netflix.com', 'wikipedia.org', 'reddit.com', 'bing.com',
+    'yahoo.com', 'whatsapp.com', 'telegram.org',
   ]);
 
   function isTrusted(hostname) {

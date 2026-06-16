@@ -149,7 +149,7 @@
     const host = document.createElement('div');
     host.id = '__phishing_shield_redirect_host__';
     host.style.cssText =
-      'position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:all';
+      'position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:none';
     document.documentElement.appendChild(host);
 
     const shadow = host.attachShadow({ mode: 'closed' });
@@ -169,6 +169,7 @@
           display: inline-block; background: rgba(0,0,0,.25); border-radius: 4px;
           padding: 1px 6px; font-size: 11px; font-family: monospace; word-break: break-all;
         }
+        .banner { pointer-events: auto; }
         .btn-close {
           background: transparent; border: 1px solid rgba(255,255,255,.25);
           border-radius: 6px; color: ${titleColor}; cursor: pointer;
@@ -220,7 +221,7 @@
     const host = document.createElement('div');
     host.id = '__phishing_shield_banner_host__';
     host.style.cssText =
-      'position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:all';
+      'position:fixed;top:0;left:0;width:100%;z-index:2147483647;pointer-events:none';
     document.documentElement.appendChild(host);
 
     const shadow = host.attachShadow({ mode: 'closed' });
@@ -267,6 +268,7 @@
           transition: background .15s;
         }
         .btn-close:hover { background: rgba(255,209,102,0.15); }
+        .banner { pointer-events: auto; }
       </style>
 
       <div class="banner">

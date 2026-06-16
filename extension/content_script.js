@@ -12,21 +12,43 @@
 (function () {
   'use strict';
 
-  // ── 1. Scrape & sanitise ──────────────────────────────────────────────────
+  // ── 1. Trusted-domain bypass (runs first, before any DOM access) ──────────
+  // Well-known legitimate domains are allowlisted to avoid false positives.
+  // Check is done BEFORE cloning the DOM so we never touch YouTube / Google
+  // / etc. at all — avoiding any interference with their page lifecycle.
+
+  const TRUSTED_DOMAINS = new Set([
+    'google.com', 'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
+    'instagram.com', 'linkedin.com', 'github.com', 'apple.com', 'microsoft.com',
+    'amazon.com', 'netflix.com', 'wikipedia.org', 'reddit.com', 'bing.com',
+    'yahoo.com', 'whatsapp.com', 'telegram.org',
+  ]);
+
+  function isTrusted(hostname) {
+    for (const d of TRUSTED_DOMAINS) {
+      if (hostname === d || hostname.endsWith('.' + d)) return true;
+    }
+    if (hostname.endsWith('.gov') || hostname.endsWith('.edu') ||
+        hostname.endsWith('.mil')) return true;
+    return false;
+  }
 
   const rawUrl = window.location.href;
 
-  // For blob: URLs (e.g. blob:https://cxztsnation.com/uuid), extract the
-  // embedded HTTPS origin as the effective URL for analysis. The blob UUID
-  // itself carries no signal; the embedded domain is what matters.
+  // For blob: URLs, extract the embedded HTTPS origin as the effective URL.
   let url = rawUrl;
   if (rawUrl.startsWith('blob:')) {
     try {
-      url = new URL(rawUrl.slice(5)).origin; // → https://cxztsnation.com
+      url = new URL(rawUrl.slice(5)).origin;
     } catch (e) {
       url = rawUrl;
     }
   }
+
+  const effectiveHostname = new URL(url).hostname;
+  if (isTrusted(effectiveHostname)) return; // ← exit before touching DOM
+
+  // ── 2. Scrape & sanitise ──────────────────────────────────────────────────
 
   // Clone the DOM so we never touch the live page.
   const domClone = document.documentElement.cloneNode(true);
@@ -43,33 +65,6 @@
   if (dom.length > MAX_DOM_BYTES) {
     dom = dom.slice(0, MAX_DOM_BYTES);
   }
-
-  // ── 2. Trusted-domain bypass ──────────────────────────────────────────────
-  // Well-known legitimate domains are allowlisted to avoid false positives
-  // while the model continues to improve. This mirrors the approach used by
-  // Google Safe Browsing and other production phishing filters.
-
-  const TRUSTED_DOMAINS = new Set([
-    'google.com', 'youtube.com', 'facebook.com', 'twitter.com', 'x.com',
-    'instagram.com', 'linkedin.com', 'github.com', 'apple.com', 'microsoft.com',
-    'amazon.com', 'netflix.com', 'wikipedia.org', 'reddit.com', 'bing.com',
-    'yahoo.com', 'whatsapp.com', 'telegram.org',
-  ]);
-
-  function isTrusted(hostname) {
-    // Match exact domain or any subdomain: www.google.com → google.com ✓
-    // google.com.evil.com → evil.com, not google.com ✓
-    for (const d of TRUSTED_DOMAINS) {
-      if (hostname === d || hostname.endsWith('.' + d)) return true;
-    }
-    // Also trust government and educational TLDs
-    if (hostname.endsWith('.gov') || hostname.endsWith('.edu') ||
-        hostname.endsWith('.mil')) return true;
-    return false;
-  }
-
-  const effectiveHostname = new URL(url).hostname;
-  if (isTrusted(effectiveHostname)) return;
 
   // ── 3. Send to background worker ─────────────────────────────────────────
 

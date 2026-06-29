@@ -676,7 +676,8 @@ def _rule_url_score(url: str) -> float:
 
 # Genuine government second-level domains to exclude from the check.
 _REAL_GOV_SLDS = {'gov.uk', 'gov.au', 'gov.nz', 'govt.nz', 'gov.sg', 'gov.in',
-                  'gov.za', 'gov.ca', 'gov.ie', 'gov.br', 'gob.mx', 'gouv.fr'}
+                  'gov.za', 'gov.ca', 'gov.ie', 'gov.br', 'gob.mx', 'gouv.fr',
+                  'gov.my'}
 
 def _gov_impersonation_score(url: str) -> float:
     """

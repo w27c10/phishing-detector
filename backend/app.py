@@ -675,28 +675,39 @@ def _rule_url_score(url: str) -> float:
 # ── 2. Government keyword impersonation scorer ────────────────────────────────
 
 # Genuine government second-level domains to exclude from the check.
-_REAL_GOV_SLDS = {'gov.uk', 'gov.au', 'gov.nz', 'govt.nz', 'gov.sg', 'gov.in',
-                  'gov.za', 'gov.ca', 'gov.ie', 'gov.br', 'gob.mx', 'gouv.fr',
-                  'gov.my'}
-
 def _gov_impersonation_score(url: str) -> float:
     """
-    Returns 1.0 if 'gov' appears as a standalone hyphen-delimited word in the
-    hostname but the domain is not a genuine government TLD or SLD.
+    Returns 1.0 if 'gov' appears as a hyphen-delimited word in the hostname
+    but NOT in the structural TLD/SLD position that indicates a genuine
+    government domain.
+
+    Real government domains always have 'gov' (or 'go') at parts[-1] or
+    parts[-2]:
+      jpj.gov.my      → parts[-2] = 'gov' → safe
+      example.gov     → parts[-1] = 'gov' → safe
+      moe.go.id       → parts[-2] = 'go'  → safe
+    Phishing domains put 'gov' in a prefix position:
+      gov-jpj.evil.com   → parts[-2] = 'evil'  → phishing
+      jpj-gov.evil.com   → parts[-2] = 'evil'  → phishing
+      gov.phishing.com   → parts[-2] = 'phishing' → phishing
     """
     try:
         parsed = urlparse(url)
         host   = parsed.hostname or ''
-        parts  = host.split('.')
-        tld    = parts[-1].lower()
+        parts  = [p.lower() for p in host.split('.')]
 
-        if tld in ('gov', 'mil'):
-            return 0.0
-        if len(parts) >= 2 and f'{parts[-2].lower()}.{tld}' in _REAL_GOV_SLDS:
+        if len(parts) < 2:
             return 0.0
 
+        # True government domain: 'gov'/'mil'/'go' is the TLD or SLD
+        if parts[-1] in ('gov', 'mil'):
+            return 0.0
+        if parts[-2] in ('gov', 'go', 'mil'):
+            return 0.0
+
+        # 'gov' appears somewhere in the hostname but not in TLD/SLD → impersonation
         for part in parts:
-            if 'gov' in part.lower().split('-'):
+            if 'gov' in part.split('-'):
                 return 1.0
         return 0.0
     except Exception:

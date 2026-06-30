@@ -897,10 +897,12 @@ def _llm_partner_check(html: str, dominant_domain: str) -> bool:
         prompt = (
             f'Page text: "{page_text}"\n'
             f'Most-linked external domain: {dominant_domain}\n\n'
-            f'Is this page claiming to BE {dominant_domain} (phishing/impersonation), '
-            f'or is it an AUTHORIZED DEALER / PARTNER / RESELLER of {dominant_domain} '
-            f'(legitimate business)?\n'
-            f'Reply with exactly one word: IMPERSONATION or PARTNER.'
+            f'Is this page a LEGITIMATE website associated with {dominant_domain} '
+            f'(e.g. an official product or service by the same company, a subsidiary, '
+            f'an authorized partner/reseller, or a news/review/educational site about the brand), '
+            f'or is it a FAKE site trying to deceive users into thinking '
+            f'they are interacting with {dominant_domain}?\n\n'
+            f'Reply with exactly one word: LEGITIMATE or IMPERSONATION.'
         )
         payload = json.dumps({
             'contents': [{'parts': [{'text': prompt}]}]
@@ -915,7 +917,7 @@ def _llm_partner_check(html: str, dominant_domain: str) -> bool:
             result = json.loads(resp.read())
         answer = result['candidates'][0]['content']['parts'][0]['text'].strip().upper()
         print(f'[PhishingDetector] Gemini partner check → {answer} ({dominant_domain})')
-        return 'PARTNER' in answer
+        return 'LEGITIMATE' in answer
     except Exception as exc:
         print(f'[PhishingDetector] Gemini partner check failed: {exc}')
         return False

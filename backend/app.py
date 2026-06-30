@@ -909,7 +909,7 @@ def _llm_partner_check(html: str, dominant_domain: str) -> bool:
         }).encode()
         req = urllib.request.Request(
             f'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-1.5-flash:generateContent?key={GEMINI_KEY}',
+            f'gemini-3.1-flash-lite:generateContent?key={GEMINI_KEY}',
             data=payload,
             headers={'Content-Type': 'application/json'},
         )

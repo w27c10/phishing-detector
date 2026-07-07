@@ -12,6 +12,12 @@
 (function () {
   'use strict';
 
+  // ── 0. Non-HTML page bypass ───────────────────────────────────────────────
+  // Skip analysis when Chrome is displaying a raw image, PDF, or other
+  // non-HTML resource directly — the browser-generated wrapper looks like
+  // a phishing template to the model but is not a real web page.
+  if (!document.contentType.startsWith('text/html')) return;
+
   // ── 1. Trusted-domain bypass (runs first, before any DOM access) ──────────
   // Well-known legitimate domains are allowlisted to avoid false positives.
   // Check is done BEFORE cloning the DOM so we never touch YouTube / Google

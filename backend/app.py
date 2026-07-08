@@ -437,13 +437,16 @@ def analyze():
     _wu, _wa, _wd, _wm, _wb, _wdl, _wbl, _wp = _W[_scenario]
 
     # ── Fusion ─────────────────────────────────────────────────────────────────
-    # Hard overrides — structural signals only (gov keyword, link cluster, payment form).
-    # dead_link_score excluded: SPAs use href="#" for React Router links, causing
-    # false positives on legitimate single-page apps (e.g. cinema booking sites).
+    # Hard overrides — structural signals only.
+    # dead_link re-added with DOM guard: SPAs (React Router) use href="#" giving
+    # dead_link≈1, but legitimate SPAs have normal DOM structure (low dom_score).
+    # Requiring dom >= 0.60 ensures only cloned pages trigger — not real SPAs.
     # broken_link_score excluded: Railway IP is blocked by many legitimate sites.
     # brand_score excluded: text keyword matches are too noisy to hard-override alone.
-    if gov_score >= 0.8 or link_score >= 0.8 or payment_form_score >= 0.8:
-        final_score = max(gov_score, link_score, payment_form_score)
+    _dead_link_override = dead_link_score >= 0.8 and dom_score >= 0.60
+    if gov_score >= 0.8 or link_score >= 0.8 or payment_form_score >= 0.8 or _dead_link_override:
+        final_score = max(gov_score, link_score, payment_form_score,
+                          dead_link_score if _dead_link_override else 0.0)
     else:
         final_score = (
             _wu  * url_score          +
@@ -459,6 +462,12 @@ def analyze():
     # ── Scenario overrides (floor) ─────────────────────────────────────────────
     # new_financial: new domain + dead links or payment form → at least suspicious
     if _scenario == 'new_financial' and (dead_link_score >= 0.4 or payment_form_score >= 0.4):
+        final_score = max(final_score, 0.60)
+    # Dead-clone floor: most/all links dead + phishing DOM structure → at least suspicious.
+    # Covers aged/hijacked domains used for cloned phishing pages.
+    # DOM threshold 0.35 guards against SPA false positives (React Router sites have
+    # normal DOM structure, giving low dom_score even with all-dead href="#" links).
+    if dead_link_score >= 0.8 and dom_score >= 0.35:
         final_score = max(final_score, 0.60)
     # high_risk: brand impersonation on a new financial domain → phishing
     if _scenario == 'high_risk':

@@ -394,21 +394,28 @@ def analyze():
     link_score      = _link_cluster_score(url, dom)
     payment_form_score = _payment_form_score(url, dom)  # Raw CC form without processor
 
-    # ── Parallel I/O-bound checks ───────────────────────────────────────────────
-    # WHOIS, Gemini, dead-link, and broken-link are all network calls that are
-    # independent of each other — run them concurrently to cut latency.
-    _run_gemini = brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _pool:
-        _f_age    = _pool.submit(_domain_age_score, url)
-        _f_dead   = _pool.submit(_dead_link_score, url, dom)
-        _f_broken = _pool.submit(_broken_link_score, url, dom)
-        _f_gemini = _pool.submit(_gemini_brand_check, url, text) if _run_gemini else None
+    # ── Phase 1: WHOIS + dead-link + broken-link (parallel, no Gemini) ──────────
+    # Run I/O checks first to get age_score, which determines whether Gemini
+    # needs Google Search grounding (expensive, ~8-10s) or text-only (fast, ~3s).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _pool1:
+        _f_age    = _pool1.submit(_domain_age_score, url)
+        _f_dead   = _pool1.submit(_dead_link_score, url, dom)
+        _f_broken = _pool1.submit(_broken_link_score, url, dom)
 
         age_score         = _f_age.result()
         dead_link_score   = _f_dead.result()
         broken_link_score = _f_broken.result()
-        if _f_gemini is not None:
-            brand_score = _f_gemini.result()
+
+    # ── Phase 2: Gemini brand check with age-aware grounding decision ─────────
+    # New domains (age >= 0.8, i.e. < ~2 months old) are unlikely to be
+    # legitimate established brands — skip grounding for speed.
+    # Old/established domains (age < 0.8) may be real brands competing in the
+    # same space as famous ones (e.g. keypal.pro vs Ledger) — use grounding to
+    # verify legitimacy via Google Search.
+    _run_gemini = brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY
+    if _run_gemini:
+        _use_grounding = age_score < 0.8
+        brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
 
     # NLP two-layer partner check: suppress false positives for legitimate dealers
     if link_score >= 0.8:
@@ -1351,7 +1358,7 @@ def _brand_text_score(url: str, text: str) -> float:
 
 # ── 5d. Gemini dynamic brand impersonation check ──────────────────────────────
 
-def _gemini_brand_check(url: str, text: str) -> float:
+def _gemini_brand_check(url: str, text: str, use_grounding: bool = True) -> float:
     """
     Asks Gemini whether the page is impersonating a real organization or brand.
     Covers fake login pages, fake stores, fake support, fake investment platforms,
@@ -1399,15 +1406,13 @@ def _gemini_brand_check(url: str, text: str) -> float:
 
     _GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/'
 
-    def _call_gemini(use_grounding: bool) -> dict:
+    def _call_gemini(grounding: bool) -> dict:
         payload = {'contents': [{'parts': [{'text': prompt}]}]}
-        model = 'gemini-2.5-flash'
-        if use_grounding:
+        if grounding:
             payload['tools'] = [{'google_search': {}}]
-            timeout = 5   # 5s cap; TimeoutError triggers text-only fallback
+            model, timeout = 'gemini-2.5-flash', 10
         else:
-            model = 'gemini-3.1-flash-lite'   # fallback: cheaper, no grounding
-            timeout = 5
+            model, timeout = 'gemini-3.1-flash-lite', 5
         req = urllib.request.Request(
             f'{_GEMINI_BASE}{model}:generateContent?key={GEMINI_KEY}',
             data=json.dumps(payload).encode(),
@@ -1418,17 +1423,21 @@ def _gemini_brand_check(url: str, text: str) -> float:
 
     try:
         try:
-            result = _call_gemini(use_grounding=True)
-            print(f'[PhishingDetector] Gemini brand check (grounded, gemini-2.5-flash) ({host})', flush=True)
+            result = _call_gemini(grounding=use_grounding)
+            mode = 'grounded' if use_grounding else 'text-only'
+            print(f'[PhishingDetector] Gemini brand check ({mode}) ({host})', flush=True)
         except urllib.error.HTTPError as e:
-            if e.code == 429:
+            if e.code == 429 and use_grounding:
                 print(f'[PhishingDetector] Grounding 429, retrying text-only ({host})', flush=True)
-                result = _call_gemini(use_grounding=False)
+                result = _call_gemini(grounding=False)
             else:
                 raise
         except (TimeoutError, OSError):
-            print(f'[PhishingDetector] Grounding timeout, retrying text-only ({host})', flush=True)
-            result = _call_gemini(use_grounding=False)
+            if use_grounding:
+                print(f'[PhishingDetector] Grounding timeout, retrying text-only ({host})', flush=True)
+                result = _call_gemini(grounding=False)
+            else:
+                raise
         answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
         print(f'[PhishingDetector] Gemini brand check → {answer!r} ({host})', flush=True)
 

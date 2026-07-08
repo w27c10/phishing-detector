@@ -1148,7 +1148,7 @@ _BRAND_DOMAINS: dict[str, list[str]] = {
     # ── Crypto exchanges & wallets ─────────────────────────────────────────────
     'binance':         ['binance.com'],
     'coinbase':        ['coinbase.com'],
-    'crypto':          ['crypto.com'],
+    'crypto.com':      ['crypto.com'],
     'bybit':           ['bybit.com'],
     'okx':             ['okx.com'],
     'kraken':          ['kraken.com'],
@@ -1321,7 +1321,7 @@ _AMBIGUOUS_BRANDS: frozenset = frozenset({
     # Common English words
     'grab', 'line', 'wise', 'signal', 'globe', 'chase',
     'discover', 'booking', 'paramount', 'affirm', 'ledger',
-    'crypto', 'steam', 'chime',
+    'crypto.com', 'steam', 'chime',
 })
 
 def _brand_text_score(url: str, text: str) -> float:

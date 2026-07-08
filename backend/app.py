@@ -1397,19 +1397,34 @@ def _gemini_brand_check(url: str, text: str) -> float:
         f'If no: NO'
     )
 
-    try:
-        payload = json.dumps({
-            'contents': [{'parts': [{'text': prompt}]}],
-            'tools': [{'google_search': {}}],
-        }).encode()
+    _GEMINI_URL = (
+        f'https://generativelanguage.googleapis.com/v1beta/models/'
+        f'gemini-3.1-flash-lite:generateContent?key={GEMINI_KEY}'
+    )
+
+    def _call_gemini(use_grounding: bool) -> dict:
+        payload = {'contents': [{'parts': [{'text': prompt}]}]}
+        if use_grounding:
+            payload['tools'] = [{'google_search': {}}]
         req = urllib.request.Request(
-            f'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-3.1-flash-lite:generateContent?key={GEMINI_KEY}',
-            data=payload,
+            _GEMINI_URL,
+            data=json.dumps(payload).encode(),
             headers={'Content-Type': 'application/json'},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            result = json.loads(resp.read())
+            return json.loads(resp.read())
+
+    try:
+        try:
+            result = _call_gemini(use_grounding=True)
+            print(f'[PhishingDetector] Gemini brand check (grounded) ({host})', flush=True)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Grounding quota exhausted — fall back to text-only call
+                print(f'[PhishingDetector] Grounding 429, falling back to text-only ({host})', flush=True)
+                result = _call_gemini(use_grounding=False)
+            else:
+                raise
         answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
         print(f'[PhishingDetector] Gemini brand check → {answer!r} ({host})', flush=True)
 

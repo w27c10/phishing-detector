@@ -1378,29 +1378,29 @@ def _gemini_brand_check(url: str, text: str) -> float:
     clean_text = ' '.join(text.split())[:600]
 
     prompt = (
+        f'Use Google Search to look up information about the domain "{host}" '
+        f'before answering.\n\n'
         f'Page text: "{clean_text}"\n'
         f'Domain: {host}\n\n'
-        f'Is this page impersonating or falsely claiming affiliation with '
-        f'a real organization, brand, company, or official service?\n\n'
-        f'This includes: fake login pages, fake online stores claiming to sell '
-        f'official products, fake customer support, fake investment platforms, '
-        f'fake government services, or any page that misrepresents its true '
-        f'owner or affiliation.\n\n'
-        f'Important distinctions — these are NOT impersonation:\n'
-        f'- A page that merely MENTIONS or DISCUSSES a brand (e.g. news, reviews, comparisons)\n'
-        f'- A legitimate tool or service that RELATES TO a brand '
-        f'(e.g. a GPT-detection tool mentioning "GPT" is not impersonating OpenAI)\n'
-        f'- A page that uses a brand name to describe its own independent product or service\n\n'
-        f'Only reply YES if the page is actively trying to deceive users into '
-        f'believing they are on the official brand website or an officially '
-        f'affiliated service.\n\n'
-        f'If yes, reply: YES [organization name]\n'
-        f'If no, reply: NO'
+        f'Is this page impersonating a DIFFERENT, more well-known brand or organization?\n\n'
+        f'Important: If "{host}" is itself a legitimate brand, company, or official product '
+        f'(even if lesser-known), reply NO — even if it operates in the same space as '
+        f'famous brands (e.g. a real hardware wallet manufacturer is NOT impersonating '
+        f'Ledger/Trezor; a real crypto exchange is NOT impersonating Binance).\n\n'
+        f'These are also NOT impersonation:\n'
+        f'- A page that merely mentions or discusses a brand (news, reviews, comparisons)\n'
+        f'- A legitimate tool that relates to a brand '
+        f'(e.g. a GPT-detection tool is not impersonating OpenAI)\n\n'
+        f'Only reply YES if the page is actively deceiving users into thinking they are '
+        f'on a DIFFERENT brand\'s official website or affiliated service.\n\n'
+        f'If yes: YES [organization being impersonated]\n'
+        f'If no: NO'
     )
 
     try:
         payload = json.dumps({
-            'contents': [{'parts': [{'text': prompt}]}]
+            'contents': [{'parts': [{'text': prompt}]}],
+            'tools': [{'google_search': {}}],
         }).encode()
         req = urllib.request.Request(
             f'https://generativelanguage.googleapis.com/v1beta/models/'

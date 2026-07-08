@@ -437,11 +437,13 @@ def analyze():
     _wu, _wa, _wd, _wm, _wb, _wdl, _wbl, _wp = _W[_scenario]
 
     # ── Fusion ─────────────────────────────────────────────────────────────────
-    # Hard overrides — structural signals only (gov keyword, link cluster, dead links).
-    # brand_score is intentionally excluded: text keyword matches are too noisy to
-    # hard-override alone (e.g. a legit page about Chrome will mention "Google").
-    if gov_score >= 0.8 or link_score >= 0.8 or dead_link_score >= 0.8 or payment_form_score >= 0.8:
-        final_score = max(gov_score, link_score, dead_link_score, payment_form_score)
+    # Hard overrides — structural signals only (gov keyword, link cluster, payment form).
+    # dead_link_score excluded: SPAs use href="#" for React Router links, causing
+    # false positives on legitimate single-page apps (e.g. cinema booking sites).
+    # broken_link_score excluded: Railway IP is blocked by many legitimate sites.
+    # brand_score excluded: text keyword matches are too noisy to hard-override alone.
+    if gov_score >= 0.8 or link_score >= 0.8 or payment_form_score >= 0.8:
+        final_score = max(gov_score, link_score, payment_form_score)
     else:
         final_score = (
             _wu  * url_score          +

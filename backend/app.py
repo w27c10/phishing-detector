@@ -1404,14 +1404,16 @@ def _gemini_brand_check(url: str, text: str) -> float:
         model = 'gemini-2.5-flash'
         if use_grounding:
             payload['tools'] = [{'google_search': {}}]
+            timeout = 10   # grounding needs extra time for web search
         else:
             model = 'gemini-3.1-flash-lite'   # fallback: cheaper, no grounding
+            timeout = 5
         req = urllib.request.Request(
             f'{_GEMINI_BASE}{model}:generateContent?key={GEMINI_KEY}',
             data=json.dumps(payload).encode(),
             headers={'Content-Type': 'application/json'},
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
 
     try:

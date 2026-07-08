@@ -1133,7 +1133,9 @@ def _payment_form_score(url: str, dom: str) -> float:
 _BRAND_DOMAINS: dict[str, list[str]] = {
     'paypal':          ['paypal.com'],
     'apple':           ['apple.com', 'icloud.com'],
-    'google':          ['google.com', 'gmail.com', 'accounts.google'],
+    # 'google' removed from static keyword check — too many legitimate sites mention
+    # "Google Review", "Google Maps", "Google Analytics" etc., causing false positives.
+    # Real Google phishing pages are caught by dom/meta signals + Gemini grounding.
     'microsoft':       ['microsoft.com', 'live.com', 'outlook.com', 'office.com'],
     'facebook':        ['facebook.com', 'meta.com'],
     'instagram':       ['instagram.com'],

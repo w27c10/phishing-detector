@@ -1429,6 +1429,7 @@ def _gemini_brand_check(url: str, text: str) -> float:
         print(f'[PhishingDetector] Gemini brand check failed: {type(exc).__name__}: {exc}', flush=True)
         score = 0.0
 
+    # Cache result (including failures) to avoid hammering the API on rate-limit errors
     _gemini_brand_cache[url] = (score, now)
     return score
 

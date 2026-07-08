@@ -1404,7 +1404,7 @@ def _gemini_brand_check(url: str, text: str) -> float:
         model = 'gemini-2.5-flash'
         if use_grounding:
             payload['tools'] = [{'google_search': {}}]
-            timeout = 10   # grounding needs extra time for web search
+            timeout = 5   # 5s cap; TimeoutError triggers text-only fallback
         else:
             model = 'gemini-3.1-flash-lite'   # fallback: cheaper, no grounding
             timeout = 5
@@ -1422,11 +1422,13 @@ def _gemini_brand_check(url: str, text: str) -> float:
             print(f'[PhishingDetector] Gemini brand check (grounded, gemini-2.5-flash) ({host})', flush=True)
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                # Grounding quota exhausted — fall back to text-only call
-                print(f'[PhishingDetector] Grounding 429, falling back to text-only ({host})', flush=True)
+                print(f'[PhishingDetector] Grounding 429, retrying text-only ({host})', flush=True)
                 result = _call_gemini(use_grounding=False)
             else:
                 raise
+        except (TimeoutError, OSError):
+            print(f'[PhishingDetector] Grounding timeout, retrying text-only ({host})', flush=True)
+            result = _call_gemini(use_grounding=False)
         answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
         print(f'[PhishingDetector] Gemini brand check → {answer!r} ({host})', flush=True)
 

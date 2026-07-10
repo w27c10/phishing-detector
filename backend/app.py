@@ -387,6 +387,13 @@ def analyze():
     dom_score  = float(outputs[2][0][0]) if _output_count > 2 else 0.0
     meta_score = float(outputs[3][0][0]) if _output_count > 3 else 0.0
 
+    # ── Fix 2: Suppress meta_score for legitimate payment integrations ─────────
+    # The DNN flags "form action → external domain" as suspicious (meta≈1.0),
+    # but this is normal for PayPal/Stripe donation/checkout embeds.
+    # If a recognised payment processor is present in the DOM, cap meta_score.
+    if meta_score >= 0.8 and any(proc in dom.lower() for proc in _PAYMENT_PROCESSORS):
+        meta_score = min(meta_score, 0.35)
+
     # ── Additional signal scorers ──────────────────────────────────────────────
     url_score       = _rule_url_score(url)
     brand_score     = _brand_text_score(url, text)
@@ -1131,7 +1138,8 @@ def _payment_form_score(url: str, dom: str) -> float:
 
 # Maps brand keywords to their legitimate domain suffixes.
 _BRAND_DOMAINS: dict[str, list[str]] = {
-    'paypal':          ['paypal.com'],
+    # 'paypal' removed: appears on any site accepting PayPal donations/payments.
+    # Real PayPal phishing caught by dom/meta signals + Gemini grounding.
     'apple':           ['apple.com', 'icloud.com'],
     # 'google' removed from static keyword check — too many legitimate sites mention
     # "Google Review", "Google Maps", "Google Analytics" etc., causing false positives.
@@ -1180,19 +1188,13 @@ _BRAND_DOMAINS: dict[str, list[str]] = {
     'opensea':             ['opensea.io'],
     'blockchain.com':      ['blockchain.com'],
     # ── Financial / Payment ────────────────────────────────────────────────────
-    'visa':                ['visa.com'],
-    'mastercard':          ['mastercard.com'],
-    'american express':    ['americanexpress.com'],
-    'amex':                ['americanexpress.com'],
-    'western union':       ['westernunion.com'],
-    'wise':                ['wise.com'],
-    'revolut':             ['revolut.com'],
-    'venmo':               ['venmo.com'],
-    'cash app':            ['cash.app', 'cashapp.com'],
-    'alipay':              ['alipay.com'],
-    'klarna':              ['klarna.com'],
-    'afterpay':            ['afterpay.com'],
-    'affirm':              ['affirm.com'],
+    # Payment method brands removed from static check — these appear on any
+    # legitimate e-commerce/donation site ("We accept Visa", "Pay with Klarna").
+    # Keyword alone cannot distinguish acceptance from impersonation.
+    # Real phishing for these brands is caught by dom/meta signals + Gemini.
+    # 'visa', 'mastercard', 'american express', 'amex', 'western union',
+    # 'wise', 'revolut', 'venmo', 'cash app', 'alipay', 'klarna',
+    # 'afterpay', 'affirm'
     'capital one':         ['capitalone.com'],
     'discover':            ['discover.com'],
     'monzo':               ['monzo.com'],

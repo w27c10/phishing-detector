@@ -85,38 +85,28 @@
     .slice(0, 2000);
   const text = prominentText;
 
-  // ── Session ratchet: check if domain already flagged this session ────────
-  // If a previous page on this domain was confirmed phishing, show warning
-  // immediately without waiting for a new API round-trip.
-  chrome.runtime.sendMessage({ type: 'get_domain_verdict', url }, (domainVerdict) => {
-    if (domainVerdict && domainVerdict.verdict === 'phishing') {
-      injectWarning(domainVerdict);
-      return; // domain already confirmed — skip full analysis
+  // ── Check for redirect from suspicious site (Phase 1 → Phase 2 handoff) ──
+  chrome.runtime.sendMessage({ type: 'check_redirect', currentUrl: url }, (redirectInfo) => {
+    if (redirectInfo && redirectInfo.redirectedFrom) {
+      injectRedirectBanner(redirectInfo.redirectedFrom, redirectInfo.redirectedFromVerdict);
     }
 
-    // ── Check for redirect from suspicious site (Phase 1 → Phase 2 handoff) ──
-    chrome.runtime.sendMessage({ type: 'check_redirect', currentUrl: url }, (redirectInfo) => {
-      if (redirectInfo && redirectInfo.redirectedFrom) {
-        injectRedirectBanner(redirectInfo.redirectedFrom, redirectInfo.redirectedFromVerdict);
+    // Skip full analysis if Phase 1 already hard-blocked this tab.
+    if (redirectInfo && redirectInfo.earlyVerdict === 'phishing') return;
+
+    // ── Full analysis (Phase 2) ─────────────────────────────────────────────
+    console.log('[PhishingDetector] text sent to backend:', text);
+    chrome.runtime.sendMessage({ type: 'analyze', url, dom, text }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[PhishingDetector]', chrome.runtime.lastError.message);
+        return;
       }
-
-      // Skip full analysis if Phase 1 already hard-blocked this tab.
-      if (redirectInfo && redirectInfo.earlyVerdict === 'phishing') return;
-
-      // ── Full analysis (Phase 2) ───────────────────────────────────────────
-      console.log('[PhishingDetector] text sent to backend:', text);
-      chrome.runtime.sendMessage({ type: 'analyze', url, dom, text }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.warn('[PhishingDetector]', chrome.runtime.lastError.message);
-          return;
-        }
-        console.log('[PhishingDetector] response:', JSON.stringify(response));
-        if (response && response.verdict === 'phishing') {
-          injectWarning(response);
-        } else if (response && response.verdict === 'suspicious') {
-          injectCautionBanner(response);
-        }
-      });
+      console.log('[PhishingDetector] response:', JSON.stringify(response));
+      if (response && response.verdict === 'phishing') {
+        injectWarning(response);
+      } else if (response && response.verdict === 'suspicious') {
+        injectCautionBanner(response);
+      }
     });
   });
 
@@ -517,12 +507,6 @@
   // pushState / replaceState: intercepted via background's
   // onHistoryStateUpdated (runs in browser process, not isolated JS world).
   chrome.runtime.onMessage.addListener((message) => {
-    // Retroactive domain verdict upgrade: another tab on the same domain was
-    // confirmed phishing — update this tab's badge immediately.
-    if (message.type === 'domain_verdict_upgrade') {
-      if (message.verdict === 'phishing') injectWarning(message);
-      else if (message.verdict === 'suspicious') injectCautionBanner(message);
-    }
     if (message.type === 'spa_url_changed') _onSpaNavigation();
     return false;
   });

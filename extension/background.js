@@ -16,6 +16,41 @@ const API_URL_ONLY = 'https://phishing-detector-production-dd47.up.railway.app/a
 // { tabId → { url: string, verdict: string } }
 const tabState = new Map();
 
+// ── Domain-level verdict table (session-scoped, one-way ratchet) ──────────────
+// domain → { score, verdict, url, explanation_details }
+// Score only ever increases — once phishing, always phishing for this session.
+const domainVerdictTable = new Map();
+
+function _extractDomain(url) {
+  try {
+    const parts = new URL(url).hostname.split('.');
+    return parts.length >= 2 ? parts.slice(-2).join('.') : parts[0];
+  } catch { return ''; }
+}
+
+// Returns true if the verdict was upgraded (new score > existing).
+function _updateDomainVerdict(domain, score, verdict, url, explanationDetails) {
+  const existing = domainVerdictTable.get(domain);
+  if (!existing || score > existing.score) {
+    domainVerdictTable.set(domain, { score, verdict, url, explanation_details: explanationDetails || {} });
+    return true;
+  }
+  return false;
+}
+
+// Push a domain verdict upgrade to all tabs on that domain (except the sender).
+function _notifyTabsForDomain(domain, payload, excludeTabId) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id === excludeTabId || !tab.url) continue;
+      if (_extractDomain(tab.url) !== domain) continue;
+      chrome.tabs.sendMessage(tab.id, { type: 'domain_verdict_upgrade', ...payload }, () => {
+        void chrome.runtime.lastError; // suppress "no receiver" errors
+      });
+    }
+  });
+}
+
 // Detect SPA pushState navigation (Vue Router, React Router, etc.) and
 // notify the content script to re-analyse. onHistoryStateUpdated fires for
 // every history.pushState call in the page — it runs in the browser process
@@ -56,6 +91,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((r) => r.json())
       .then((data) => {
         tabState.set(tabId, { url: message.url, verdict: data.verdict });
+        // Propagate early phishing hits to domain verdict table.
+        if (data.verdict === 'phishing') {
+          const domain = _extractDomain(message.url);
+          if (domain) {
+            const upgraded = _updateDomainVerdict(domain, data.threat_score, data.verdict, message.url, {});
+            if (upgraded) _notifyTabsForDomain(domain, { threat_score: data.threat_score, verdict: data.verdict, explanation_details: {} }, tabId);
+          }
+        }
         sendResponse(data);
       })
       .catch((err) => {
@@ -90,6 +133,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false; // sync
   }
 
+  // ── Domain verdict query (content script startup check) ────────────────
+  if (message.type === 'get_domain_verdict') {
+    const domain = _extractDomain(message.url);
+    sendResponse(domain ? (domainVerdictTable.get(domain) || null) : null);
+    return false;
+  }
+
   // ── Phase 2: Full analysis (document_idle) ──────────────────────────────
   if (message.type !== 'analyze') return false;
 
@@ -99,6 +149,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const early = tabState.get(tabId);
   if (early && early.verdict === 'phishing' && !message.spa_navigation) {
     sendResponse({ verdict: 'phishing', threat_score: 1.0, _skipped: true });
+    return false;
+  }
+
+  // ── Domain-level session ratchet ────────────────────────────────────────
+  // If this domain was already confirmed phishing in this session, skip the
+  // API call and return the cached result immediately.
+  const _domain = _extractDomain(message.url);
+  const _domainVerdict = _domain ? domainVerdictTable.get(_domain) : null;
+  if (_domainVerdict && _domainVerdict.verdict === 'phishing' && !message.spa_navigation) {
+    if (tabId) tabState.set(tabId, { url: message.url, verdict: 'phishing' });
+    sendResponse({
+      verdict:             'phishing',
+      threat_score:        _domainVerdict.score,
+      explanation_details: _domainVerdict.explanation_details || {},
+      _from_domain_cache:  true,
+    });
     return false;
   }
 
@@ -124,6 +190,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((data) => {
         // Update tab state with final verdict.
         if (tabId) tabState.set(tabId, { url: message.url, verdict: data.verdict });
+
+        // Update domain-level verdict table (session ratchet — only upgrades).
+        const domain = _extractDomain(message.url);
+        if (domain && data.threat_score != null && data.verdict !== 'safe') {
+          const upgraded = _updateDomainVerdict(
+            domain, data.threat_score, data.verdict,
+            message.url, data.explanation_details
+          );
+          if (upgraded) {
+            _notifyTabsForDomain(domain, {
+              threat_score:        data.threat_score,
+              verdict:             data.verdict,
+              explanation_details: data.explanation_details || {},
+            }, tabId);
+          }
+        }
+
         sendResponse(data);
       })
       .catch((err) => {

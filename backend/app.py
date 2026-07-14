@@ -396,7 +396,8 @@ def analyze():
 
     # ── Additional signal scorers ──────────────────────────────────────────────
     url_score       = _rule_url_score(url)
-    brand_score     = _brand_text_score(url, text)
+    _is_agency_site = _multi_brand_detected(url, text)
+    brand_score     = 0.0 if _is_agency_site else _brand_text_score(url, text)
     gov_score       = _gov_impersonation_score(url)
     link_score      = _link_cluster_score(url, dom)
     payment_form_score = _payment_form_score(url, dom)  # Raw CC form without processor
@@ -419,7 +420,7 @@ def analyze():
     # Old/established domains (age < 0.8) may be real brands competing in the
     # same space as famous ones (e.g. keypal.pro vs Ledger) — use grounding to
     # verify legitimacy via Google Search.
-    _run_gemini = brand_score == 0.0 and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY
+    _run_gemini = brand_score == 0.0 and not _is_agency_site and (dom_score >= 0.6 or meta_score >= 0.6) and GEMINI_KEY
     if _run_gemini:
         _use_grounding = age_score < 0.8
         brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
@@ -1358,6 +1359,33 @@ def _brand_text_score(url: str, text: str) -> float:
                     continue
                 return 1.0
     return 0.0
+
+
+def _multi_brand_detected(url: str, text: str) -> bool:
+    """
+    Returns True if 3+ distinct brands appear in the page text.
+
+    A page mentioning 3+ brands simultaneously cannot be impersonating all of
+    them — it is almost certainly a partner/agency/comparison page listing the
+    platforms it works with (e.g. "We build Shopify, WooCommerce, and Wix sites").
+    In this case brand impersonation scoring should be suppressed entirely.
+    """
+    host       = urlparse(url).hostname or ''
+    reg_domain = _reg_domain(host).lower()
+    text_lower = text.lower()
+    detected   = 0
+
+    for brand, legit_domains in _BRAND_DOMAINS.items():
+        pattern   = r'\b' + re.escape(brand) + r'\b'
+        min_count = 2 if brand in _AMBIGUOUS_BRANDS else 1
+        if len(re.findall(pattern, text_lower)) >= min_count:
+            if not any(d in host for d in legit_domains):
+                if re.search(pattern, reg_domain):
+                    continue
+                detected += 1
+                if detected >= 3:
+                    return True
+    return False
 
 
 # ── 5d. Gemini dynamic brand impersonation check ──────────────────────────────

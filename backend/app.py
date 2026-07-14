@@ -442,12 +442,13 @@ def analyze():
             if _now - _cached_ts < _GEMINI_BRAND_TTL:
                 brand_score = _cached_score
             else:
-                _use_grounding = age_score < 0.8
-                brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
+                brand_score = _gemini_brand_check(url, text, use_grounding=False)
                 _gemini_domain_cache[_hostname] = (brand_score, _now)
         else:
-            _use_grounding = age_score < 0.8
-            brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
+            # Always text-only for Method B: uses gemini-3.1-flash-lite (500 RPD)
+            # rather than gemini-2.5-flash (20 RPD). Page text alone is sufficient
+            # to distinguish agency listings from genuine brand impersonation.
+            brand_score = _gemini_brand_check(url, text, use_grounding=False)
             _gemini_domain_cache[_hostname] = (brand_score, _now)
 
     # NLP two-layer partner check: suppress false positives for legitimate dealers

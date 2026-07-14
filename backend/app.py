@@ -431,7 +431,6 @@ def analyze():
     # intent. If meta and url signals are both low, ask Gemini to confirm whether
     # this is genuine impersonation before treating brand_score as 1.0.
     _brand_needs_verify = (brand_score == 1.0 and
-                           meta_score < 0.5 and
                            url_score < 0.15 and
                            GEMINI_KEY)
     if _brand_needs_verify:

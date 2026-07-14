@@ -80,6 +80,7 @@ _sb_cache:  dict[str, tuple[float, float]] = {}   # url → (score, timestamp)
 _SB_TTL       = 1800   # cache results 30 min (Google's recommended minimum)
 
 _gemini_brand_cache: dict[str, tuple[float, float]] = {}  # url → (score, timestamp)
+_gemini_domain_cache: dict[str, tuple[float, float]] = {}  # hostname → (score, timestamp)
 _GEMINI_BRAND_TTL = 1800
 
 def _safe_browsing_score(url: str) -> float:
@@ -425,17 +426,29 @@ def analyze():
         _use_grounding = age_score < 0.8
         brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
 
-    # Method B: Gemini verification for brand=1 with low structural corroboration.
+    # Method B: Gemini verification for brand=1 with clean URL.
     # Static brand detection fires when a brand name appears in text, but agency/
-    # partner pages legitimately list brand names without any credential-harvesting
-    # intent. If meta and url signals are both low, ask Gemini to confirm whether
-    # this is genuine impersonation before treating brand_score as 1.0.
+    # partner pages legitimately list brand names without credential-harvesting intent.
+    # Uses domain-level cache so all pages on the same hostname share one Gemini call,
+    # reducing API quota usage significantly vs per-URL caching.
     _brand_needs_verify = (brand_score == 1.0 and
                            url_score < 0.15 and
                            GEMINI_KEY)
     if _brand_needs_verify:
-        _use_grounding = age_score < 0.8
-        brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
+        _hostname = urlparse(url).hostname or url
+        _now = time.time()
+        if _hostname in _gemini_domain_cache:
+            _cached_score, _cached_ts = _gemini_domain_cache[_hostname]
+            if _now - _cached_ts < _GEMINI_BRAND_TTL:
+                brand_score = _cached_score
+            else:
+                _use_grounding = age_score < 0.8
+                brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
+                _gemini_domain_cache[_hostname] = (brand_score, _now)
+        else:
+            _use_grounding = age_score < 0.8
+            brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
+            _gemini_domain_cache[_hostname] = (brand_score, _now)
 
     # NLP two-layer partner check: suppress false positives for legitimate dealers
     if link_score >= 0.8:

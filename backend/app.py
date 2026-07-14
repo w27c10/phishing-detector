@@ -425,6 +425,19 @@ def analyze():
         _use_grounding = age_score < 0.8
         brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
 
+    # Method B: Gemini verification for brand=1 with low structural corroboration.
+    # Static brand detection fires when a brand name appears in text, but agency/
+    # partner pages legitimately list brand names without any credential-harvesting
+    # intent. If meta and url signals are both low, ask Gemini to confirm whether
+    # this is genuine impersonation before treating brand_score as 1.0.
+    _brand_needs_verify = (brand_score == 1.0 and
+                           meta_score < 0.5 and
+                           url_score < 0.15 and
+                           GEMINI_KEY)
+    if _brand_needs_verify:
+        _use_grounding = age_score < 0.8
+        brand_score = _gemini_brand_check(url, text, use_grounding=_use_grounding)
+
     # NLP two-layer partner check: suppress false positives for legitimate dealers
     if link_score >= 0.8:
         if _is_brand_partner(dom):                                          # Layer 1
